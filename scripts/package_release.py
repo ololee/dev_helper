@@ -36,6 +36,8 @@ def prepare(output: Path, skill_source: Path | None = None):
     # descend into runtime data, virtualenvs, proof files or private documents.
     for relative, path in files.items():
         target = output / relative
+        if not target.parent.resolve().is_relative_to(output):
+            raise ValueError('A release destination directory escapes the output: ' + relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_symlink():
             raise ValueError('A release destination is a symlink: ' + relative)
