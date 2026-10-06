@@ -29,7 +29,7 @@ class PublishTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_manifest_cannot_include_runtime_or_symlinks(self):
-        for path in ('data/private.md', '.venv/bin/python', 'control-state.json', '../private.md', '/private.md', 'verification.json'):
+        for path in ('data/private.md', '.venv/bin/python', '.asr-venv/bin/python', 'control-state.json', '../private.md', '/private.md', 'verification.json'):
             self.assertFalse(publish.valid_path(path))
         (self.root / 'server.py').unlink()
         (self.root / 'server.py').symlink_to(self.root / 'publish-files.json')

@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -75,6 +76,34 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(partial.status_code, 206)
         self.assertEqual(partial.content, raw[:8])
         self.assertEqual(self.client.head(path).content, b'')
+
+    def test_notes_workflow_http_mcp_and_scheduled_queue(self):
+        self.assertEqual(self.client.get('/notes').status_code, 200)
+        self.assertEqual(self.client.get('/device-ui/mac/notes').status_code, 200)
+        self.assertEqual(self.client.get('/device-ui/android/notes').status_code, 200)
+        config = self.client.post('/api/workflows/config', json={'deepseekApiKey': 'owned-synthetic-test-key'}).json()
+        self.assertTrue(config['hasDeepseekApiKey'])
+        self.assertNotIn('owned-synthetic-test-key', json.dumps(config))
+        tools = self.rpc('tools/list')['result']['tools']
+        self.assertIn('devhelper_workflow_submit', [item['name'] for item in tools])
+        task = self.rpc('tools/call', {'name': 'devhelper_workflow_submit', 'arguments': {'type': 'tool', 'device': 'mac', 'toolName': 'knowledge_list_documents', 'arguments': {}}})['result']['structuredContent']
+        for _ in range(50):
+            result = self.client.get('/device-api/mac/api/workflows/tasks/' + task['id']).json()
+            if result['status'] not in ('pending', 'running'):
+                break
+            time.sleep(.02)
+        self.assertEqual(result['status'], 'succeeded', result)
+        schedule = self.client.post('/device-api/mac/api/knowledge/schedules', json={
+            'title': 'Owned scheduled workflow', 'toolName': 'devhelper_workflow_submit',
+            'arguments': {'type': 'tool', 'device': 'mac', 'toolName': 'knowledge_list_documents', 'arguments': {}},
+            'runAt': '2020-01-01T00:00:00Z', 'enabled': True}).json()
+        for _ in range(70):
+            saved = self.desktop.knowledge.read_schedule(schedule['id'])
+            if saved['lastStatus'] == 'completed':
+                break
+            time.sleep(.02)
+        self.assertEqual(saved['lastStatus'], 'completed', saved)
+        self.assertEqual(self.client.get('/api/workflows/tasks').status_code, 200)
 
 
 if __name__ == '__main__':

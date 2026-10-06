@@ -152,7 +152,19 @@ def _name(value: str, fallback: str = "media") -> str:
     return cleaned[:160] or fallback
 
 
-def _sniff(header: bytes) -> tuple[str, str, str]:
+def _sniff(header: bytes, declared: str = "") -> tuple[str, str, str]:
+    if len(header) >= 12 and header[:4] in (b"RIFF", b"RF64") and header[8:12] == b"WAVE":
+        return "audio/wav", "audio", "wav"
+    if header.startswith(b"fLaC"):
+        return "audio/flac", "audio", "flac"
+    if header.startswith(b"OggS") and (b"OpusHead" in header or b"vorbis" in header):
+        return "audio/ogg", "audio", "ogg"
+    if header.startswith(b"ID3") and len(header) >= 10:
+        return "audio/mpeg", "audio", "mp3"
+    if len(header) >= 2 and header[0] == 0xff and header[1] & 0xf6 == 0xf0:
+        return "audio/aac", "audio", "aac"
+    if len(header) >= 4 and header[0] == 0xff and header[1] & 0xe0 == 0xe0 and header[1] & 6:
+        return "audio/mpeg", "audio", "mp3"
     if header.startswith(b"\xff\xd8\xff"):
         return "image/jpeg", "image", "jpg"
     if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24 and header[12:16] == b"IHDR":
@@ -170,13 +182,19 @@ def _sniff(header: bytes) -> tuple[str, str, str]:
             return "image/heic", "image", "heic"
         if brands & {b"mif1", b"msf1"}:
             return "image/heif", "image", "heif"
+        if brands & {b"M4A ", b"M4B ", b"mp4a"}:
+            return "audio/mp4", "audio", "m4a"
         if b"qt  " in brands:
             return "video/quicktime", "video", "mov"
         if brands & {b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"hvc1", b"M4V "}:
+            if declared == "audio/mp4":
+                return "audio/mp4", "audio", "m4a"
             return "video/mp4", "video", "mp4"
     if header.startswith(b"\x1aE\xdf\xa3") and b"webm" in header:
+        if declared == "audio/webm":
+            return "audio/webm", "audio", "webm"
         return "video/webm", "video", "webm"
-    raise KnowledgeError("Unsupported media; choose JPEG, PNG, WebP, GIF, HEIC/HEIF, MP4, MOV or WebM")
+    raise KnowledgeError("Unsupported media; choose an image, video or WAV, MP3, M4A, AAC, FLAC, Ogg or WebM audio")
 
 
 class KnowledgeService:
@@ -235,6 +253,7 @@ class KnowledgeService:
             rows = self._document_rows()
             return {"totalDocuments": len(rows), "memoryDocuments": sum(d["kind"] == "memory" for d in rows),
                     "skillDocuments": sum(d["kind"] == "skill" for d in rows),
+                    "noteDocuments": sum(d["kind"] == "note" for d in rows),
                     "enabledDocuments": sum(d["enabled"] for d in rows),
                     "autoLoadDocuments": sum(d["enabled"] and d["autoLoad"] for d in rows),
                     "totalBytes": sum(d["bytes"] for d in rows), "maxDocuments": None,
@@ -242,8 +261,8 @@ class KnowledgeService:
 
     def list_documents(self, kind: str | None = None, query: str | None = None, offset: int = 0, limit: int = 50) -> dict:
         with self.lock:
-            if kind not in (None, "", "memory", "skill"):
-                raise KnowledgeError("kind must be memory or skill")
+            if kind not in (None, "", "memory", "skill", "note"):
+                raise KnowledgeError("kind must be memory, skill or note")
             needle = _text(query or "", "query", 512).casefold()
             rows = []
             for doc in self._document_rows():
@@ -275,8 +294,8 @@ class KnowledgeService:
                 raise KnowledgeError("Document revision conflict; reload before saving", 409)
             identifier = old["id"] if old else (_identifier(new_sync_id) if new_sync_id else str(uuid.uuid4()))
             kind = fields.get("kind", old["kind"] if old else None)
-            if kind not in ("memory", "skill"):
-                raise KnowledgeError("kind must be memory or skill")
+            if kind not in ("memory", "skill", "note"):
+                raise KnowledgeError("kind must be memory, skill or note")
             title = _text(fields.get("title", old["title"] if old else None), "title", 200, True).strip()
             content = _text(fields.get("content", old["content"] if old else None), "content", 65536)
             encoded = content.encode("utf-8")
@@ -289,7 +308,7 @@ class KnowledgeService:
             now = _now()
             result = {"id": identifier, "kind": kind, "title": title, "tags": tags,
                       "enabled": _bool(fields.get("enabled", old["enabled"] if old else True), "enabled"),
-                      "autoLoad": _bool(fields.get("autoLoad", old["autoLoad"] if old else True), "autoLoad"),
+                      "autoLoad": _bool(fields.get("autoLoad", old["autoLoad"] if old else kind != "note"), "autoLoad"),
                       "createdAt": old["createdAt"] if old else _instant(now), "updatedAt": _instant(now),
                       "updatedAtMillis": now, "revision": revision + 1, "bytes": len(encoded)}
             directory = self.markdown_root / identifier
@@ -375,7 +394,7 @@ class KnowledgeService:
             _known(document, "kind", "title", "content", "tags", "enabled", "autoLoad")
             if set(document) != {"kind", "title", "content", "tags", "enabled", "autoLoad"}:
                 raise KnowledgeError("Sync documents require all portable fields")
-            if (document["kind"] not in ("memory", "skill") or not isinstance(document["title"], str)
+            if (document["kind"] not in ("memory", "skill", "note") or not isinstance(document["title"], str)
                     or not isinstance(document["content"], str) or not isinstance(document["tags"], list)
                     or not all(isinstance(tag, str) for tag in document["tags"])
                     or not isinstance(document["enabled"], bool) or not isinstance(document["autoLoad"], bool)):
@@ -479,8 +498,8 @@ class KnowledgeService:
         space = _text(fields.get("space"), "space", 80, True)
         limit = _int(fields.get("limit", 5), "limit", 1, 50)
         kind = fields.get("kind")
-        if kind not in (None, "memory", "skill"):
-            raise KnowledgeError("kind must be memory or skill")
+        if kind not in (None, "memory", "skill", "note"):
+            raise KnowledgeError("kind must be memory, skill or note")
         started = time.perf_counter()
         with self.lock:
             definition = self.db.execute("SELECT dimension,model FROM spaces WHERE space=?", (space,)).fetchone()
@@ -742,9 +761,13 @@ class KnowledgeService:
             refs = self._references(identifier)
             return {**data, "contentPath": f"{API}/attachments/{identifier}/content", "referenceCount": len(refs)}
 
-    def list_attachments(self, offset: int = 0, limit: int = 32) -> dict:
+    def list_attachments(self, offset: int = 0, limit: int = 32, media_type: str | None = None) -> dict:
         with self.lock:
+            if media_type not in (None, "image", "video", "audio"):
+                raise KnowledgeError("mediaType must be image, video or audio")
             rows = sorted((json.loads(r[0]) for r in self.db.execute("SELECT metadata FROM attachments")), key=lambda a: (a["createdAt"], a["id"]), reverse=True)
+            if media_type:
+                rows = [row for row in rows if row["kind"] == media_type]
             items = [self.read_attachment(row["id"]) for row in rows]
             return _page(items, "attachments", offset, limit, bytes=sum(r["bytes"] for r in rows),
                          maxAttachments=None, maxImageBytes=None, maxVideoBytes=None, maxTotalBytes=None,
@@ -782,8 +805,9 @@ class KnowledgeService:
                     break
                 prefix.extend(chunk)
             header = bytes(prefix)
-            detected_mime, kind, extension = _sniff(header)
             declared_mime = mime.lower().split(";", 1)[0]
+            declared_mime = {"audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/x-flac": "audio/flac", "application/ogg": "audio/ogg"}.get(declared_mime, declared_mime)
+            detected_mime, kind, extension = _sniff(header, declared_mime)
             compatible_heif = {declared_mime, detected_mime} <= {"image/heic", "image/heif"}
             if declared_mime != "application/octet-stream" and declared_mime != detected_mime and not compatible_heif:
                 raise KnowledgeError("Declared media type does not match the file")
@@ -841,7 +865,7 @@ class KnowledgeService:
     def list_resources(self, fields: dict) -> dict:
         _known(fields, "source", "kind", "query", "offset", "limit")
         source, kind = fields.get("source", "all"), fields.get("kind", "all")
-        if source not in ("all", "attachment", "artifact") or kind not in ("all", "image", "video"):
+        if source not in ("all", "attachment", "artifact") or kind not in ("all", "image", "video", "audio"):
             raise KnowledgeError("Invalid resource filter")
         needle = _text(fields.get("query", ""), "query", 200).casefold()
         with self.lock:
@@ -892,7 +916,7 @@ class KnowledgeService:
                 mime = mimetypes.guess_type(selected.name)[0] or "application/octet-stream"
                 entry = {"path": str(selected), "name": child.name, "kind": "directory" if selected.is_dir() else "file",
                          "size": stat.st_size if selected.is_file() else 0, "modifiedAt": _instant(int(stat.st_mtime * 1000)),
-                         "mediaType": "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else "file"}
+                         "mediaType": "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else "audio" if mime.startswith("audio/") else "file"}
                 if selected.is_file():
                     entry["downloadPath"] = API + "/resources/file-download?path=" + quote(str(selected), safe="")
                 entries.append(entry)
@@ -909,7 +933,7 @@ class KnowledgeService:
         if not selected.is_file():
             raise KnowledgeError("Choose a regular media file")
         with selected.open("rb") as source:
-            return self.import_attachment(source, selected.name, length=selected.stat().st_size)
+            return self.import_attachment(source, selected.name, mimetypes.guess_type(selected.name)[0] or "application/octet-stream", length=selected.stat().st_size)
 
     def media_info(self, identifier: str) -> dict:
         with self.lock:
@@ -1013,12 +1037,12 @@ class KnowledgeService:
                 if method == "DELETE":
                     return Response(data=self.delete_schedule(route[10:]))
             elif route == "attachments" and method == "GET":
-                return Response(data=self.list_attachments(qint("offset", 0), qint("limit", 32)))
+                return Response(data=self.list_attachments(qint("offset", 0), qint("limit", 32), query.get("mediaType")))
             elif route == "attachments/upload" and method == "POST":
                 raw_length = headers.get("content-length")
                 length = int(raw_length) if raw_length is not None else None
                 if body is None:
-                    raise KnowledgeError("Upload one image or video as a raw request body")
+                    raise KnowledgeError("Upload one image, video or audio as a raw request body")
                 return Response(data=self.import_attachment(body, query.get("name", "media"), headers.get("content-type", "application/octet-stream").split(";", 1)[0], length))
             elif route.startswith("attachments/"):
                 parts = route[12:].split("/")
@@ -1082,15 +1106,15 @@ class KnowledgeService:
         identifier = {"type": "string", "format": "uuid"}
         integer = {"type": "integer", "minimum": 0}
         pagination = {"offset": integer, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}
-        doc = {"id": identifier, "kind": {"enum": ["memory", "skill"]}, "title": text, "content": text,
+        doc = {"id": identifier, "kind": {"enum": ["memory", "skill", "note"]}, "title": text, "content": text,
                "tags": {"type": "array", "items": text}, "enabled": {"type": "boolean"}, "autoLoad": {"type": "boolean"}, "expectedRevision": integer}
         schedule = {"id": identifier, "title": text, "toolName": text, "arguments": {"type": "object"},
                     "runAt": text, "intervalMinutes": {"type": "integer", "minimum": 0, "maximum": 43200},
                     "enabled": {"type": "boolean"}, "expectedRevision": integer}
         result = [
-            self._spec("knowledge_list_documents", "List or search local desktop Markdown memories and skills.", {"kind": doc["kind"], "query": text, **pagination}),
+            self._spec("knowledge_list_documents", "List or search local desktop Markdown memories, notes and skills.", {"kind": doc["kind"], "query": text, **pagination}),
             self._spec("knowledge_read_document", "Read Markdown including its revision; use expectedRevision when saving.", {"id": identifier}, ("id",)),
-            self._spec("knowledge_save_document", "Create/edit a local Markdown memory or skill. New records require kind/title/content. Edits preserve omitted fields and invalidate old vectors.", doc, read_only=False),
+            self._spec("knowledge_save_document", "Create/edit a local Markdown memory, note or skill. New records require kind/title/content. Notes default to autoLoad=false. Edits preserve omitted fields and invalidate old vectors.", doc, read_only=False),
             self._spec("knowledge_delete_document", "Delete a local memory or skill and its vectors.", {"id": identifier}, ("id",), False, True),
             self._spec("knowledge_get_context", "Read enabled, auto-loaded memories and skills as reference data. No stored text is executed.", {"maxChars": {"type": "integer", "minimum": 0, "maximum": 262144}}),
             self._spec("knowledge_search_documents", "Search enabled local documents by literal keyword; no model is needed.", {"query": text, "kind": doc["kind"], "limit": pagination["limit"]}, ("query",)),
@@ -1105,7 +1129,7 @@ class KnowledgeService:
             self._spec("knowledge_list_attachments", "List desktop imported image/video copies and download paths.", pagination),
             self._spec("knowledge_read_attachment", "Read attachment metadata and relative download path.", {"id": identifier}, ("id",)),
             self._spec("knowledge_delete_attachment", "Delete an unreferenced media copy. Referenced media must first be removed from saved Markdown.", {"id": identifier}, ("id",), False, True),
-            self._spec("knowledge_list_managed_resources", "List managed desktop media and saved-document references.", {"source": {"enum": ["all", "attachment", "artifact"]}, "kind": {"enum": ["all", "image", "video"]}, "query": text, **pagination}),
+            self._spec("knowledge_list_managed_resources", "List managed desktop media and saved-document references.", {"source": {"enum": ["all", "attachment", "artifact"]}, "kind": {"enum": ["all", "image", "video", "audio"]}, "query": text, **pagination}),
             self._spec("knowledge_rename_managed_resource", "Rename a desktop attachment without changing its content or Markdown address.", {"source": {"const": "attachment"}, "id": identifier, "name": text}, ("source", "id", "name"), False),
             self._spec("knowledge_delete_managed_resource", "Delete one unreferenced desktop attachment copy.", {"source": {"const": "attachment"}, "id": identifier}, ("source", "id"), False, True),
             self._spec("knowledge_browse_device_files", "Browse configured desktop shared directories. Files are read-only; symlinks cannot escape shared roots.", {"path": text, "query": text, **pagination}),

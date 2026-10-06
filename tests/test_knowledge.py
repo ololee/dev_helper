@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+import wave
 
 try:
     from desktop.knowledge import KnowledgeService, KnowledgeError, API
@@ -54,6 +55,27 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(self.service.read_document(doc['id'])['title'], '更新标题')
         self.assertTrue(self.service.delete_document(doc['id'])['deleted'])
         self.assertFalse((self.service.markdown_root / doc['id']).exists())
+
+    def test_audio_notes_filtering_references_and_explicit_loading(self):
+        source = io.BytesIO()
+        with wave.open(source, 'wb') as audio:
+            audio.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            audio.writeframes(b'\0\0' * 1600)
+        recording = self.service.import_attachment(source.getvalue(), 'owned.wav', 'audio/wav')
+        self.service.import_attachment(PNG, 'owned.png', 'image/png')
+        page = self.service.handle('GET', API + '/attachments', {'mediaType': 'audio', 'limit': '1'})
+        self.assertEqual(page.data['total'], 1)
+        self.assertEqual(page.data['attachments'][0]['id'], recording['id'])
+        note = self.document(kind='note', content='[录音](' + recording['contentPath'] + ')')
+        self.assertFalse(note['autoLoad'])
+        self.assertNotIn(note['content'], self.service.bootstrap())
+        self.assertEqual(self.service.list_documents('note')['total'], 1)
+        self.assertEqual(self.service.document_stats()['noteDocuments'], 1)
+        with self.assertRaises(KnowledgeError):
+            self.service.delete_attachment(recording['id'])
+        self.assertEqual(self.service.list_resources({'kind': 'audio'})['items'][0]['id'], recording['id'])
+        self.service.delete_document(note['id'])
+        self.service.delete_attachment(recording['id'])
 
     def test_vector_batch_rolls_back_and_document_change_invalidates(self):
         doc = self.document()

@@ -81,7 +81,7 @@ def copy_public_source(source: Path, checkout: Path):
         path = PurePosixPath(relative)
         if path.is_absolute() or '..' in path.parts or str(path) != relative or '\\' in relative:
             raise ValueError('The source manifest includes an unsafe path')
-        blocked = {'.git', '.venv', 'data', 'shared', '__pycache__', 'build', 'dist', '.env'}
+        blocked = {'.git', '.venv', '.asr-venv', 'data', 'shared', '__pycache__', 'build', 'dist', '.env'}
         if relative in ('control-state.json', 'control.lock', '.publish-target.json', '.publish-target.tmp') or any(p in blocked or p.startswith('.env.') or p.endswith('.egg-info') for p in path.parts) or any(p.startswith('verification') or p.endswith(('.log', '.pid', '.db', '.sqlite3', '.pyc')) for p in path.parts):
             raise ValueError('The source manifest includes runtime data')
         original = source / relative

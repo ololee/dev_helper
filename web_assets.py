@@ -14,7 +14,7 @@ HERE = Path(__file__).resolve().parent
 
 def asset_path(name: str) -> Path:
     """Prefer bundled release assets, with the Android checkout as dev fallback."""
-    if name not in ("knowledge.html", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):
+    if name not in ("knowledge.html", "notes.html", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):
         raise ValueError("Unknown DevHelper asset")
     packaged = HERE / "static" / name
     if packaged.is_file():
@@ -32,7 +32,7 @@ def _scope_paths(source: str, device: Device) -> str:
     """Preserve slash escaping in HTML, regex literals and RegExp JS strings."""
     for escape_count in (2, 1, 0):
         separator = "\\" * escape_count + "/"
-        for prefix in ("/api/knowledge", "/artifacts"):
+        for prefix in ("/api/knowledge", "/api/workflows", "/artifacts"):
             original = prefix.replace("/", separator)
             scoped = (f"/device-api/{device}" + prefix).replace("/", separator)
             # Do not match a less escaped prefix inside a previously rewritten
@@ -142,4 +142,13 @@ def render_knowledge_ui(device: Device, shared_dir: Path) -> str:
     source = KNOWLEDGE_UI.read_text(encoding="utf-8")
     if device == "mac":
         source = _mac_ui(source, Path(shared_dir))
+    return _scope_paths(source, device)
+
+
+def render_notes_ui(device: Device, shared_dir: Path | None = None) -> str:
+    """Scope the shared Notes UI and microphone storage to the selected device."""
+    if device not in ("mac", "android"):
+        raise ValueError("Unknown device; choose mac or android")
+    source = asset_path("notes.html").read_text(encoding="utf-8")
+    source = _replace_required(source, "const ORIGIN='android';", f"const ORIGIN='{device}';")
     return _scope_paths(source, device)
