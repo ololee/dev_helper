@@ -93,13 +93,13 @@ MCP 提供电脑本地笔记、记忆、Skills、向量、资源、日程和后�
 
 ## 新电脑部署与私有资料恢复
 
-这个仓库可独立安装，不需要 Android 项目的其他目录。克隆你已确认的 GitHub 仓库，然后在仓库根目录建立上面的 Python 环境。仓库携带离线 Markdown 预览资源与原始许可证。
+这个仓库可独立安装，不需要 Android 项目的其他目录。默认部署源为 [ololee/dev_helper](https://github.com/ololee/dev_helper)，克隆地址是 `https://github.com/ololee/dev_helper.git`；用户指定其他仓库时使用用户给出的地址。克隆后在仓库根目录建立上面的 Python 环境。仓库携带离线 Markdown 预览资源与原始许可证。
 
-仓库内的 `skills/devhelper-deploy` 是可安装到 Codex 的部署 Skill。它可以从指定 GitHub 仓库安装或更新，再启动电脑版、发现手机并恢复资料。将该 Skill 目录复制到你的 Codex `skills` 目录，或让 Codex 使用这份 Skill 完成部署。部署脚本也可以直接运行；先替换示例中的仓库地址和目录：
+仓库内的 `skills/devhelper-deploy` 是可安装到 Codex 的部署 Skill。它可以从默认或用户指定的 GitHub 仓库安装或更新，再启动电脑版、发现手机并恢复资料。将该 Skill 目录复制到你的 Codex `skills` 目录，或让 Codex 使用这份 Skill 完成部署。部署脚本也可以直接运行；以下示例使用默认仓库，需要其他仓库时替换 `--repo` 的值：
 
 ```sh
 python3 skills/devhelper-deploy/scripts/deploy.py install \
-  --repo https://github.com/你的账号/已确认的仓库.git \
+  --repo https://github.com/ololee/dev_helper.git \
   --checkout "$HOME/DevHelper" --install-skills
 ```
 
@@ -130,7 +130,7 @@ POST /api/sync/materialize  {"installSkills":true}
 
 ```sh
 python3 scripts/publish.py
-python3 scripts/publish.py --configure https://github.com/你的账号/已确认的仓库.git --branch main
+python3 scripts/publish.py --configure https://github.com/ololee/dev_helper.git --branch main
 python3 scripts/publish.py --commit "说明这次源码更新"
 python3 scripts/publish.py --push
 ```

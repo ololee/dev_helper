@@ -9,7 +9,7 @@ DevHelper 的公开源码和私有资料分开保存。GitHub 只保存允许发
 
 ## 安装或更新
 
-使用用户明确指定或此安装已保存的 GitHub 仓库 URL，不猜测账号、仓库或可见性。新安装需要仓库 URL 与目标目录；默认可用 `~/DevHelper`。当前验证平台为 macOS，Python 3.11+；其他平台先确认本地剪贴板适配情况，不承诺相同能力。
+默认部署源为 `https://github.com/ololee/dev_helper.git`。用户明确指定其他 GitHub 仓库时优先使用用户给出的 URL；已有安装更新时使用它保存的仓库 URL 并核对 origin，不擅自切换到默认仓库。不猜测其他账号、仓库或可见性。新安装需要目标目录，默认可用 `~/DevHelper`；部署脚本的 `--repo` 参数仍须明确传入以上默认地址或用户指定地址。当前验证平台为 macOS，Python 3.11+；其他平台先确认本地剪贴板适配情况，不承诺相同能力。
 
 运行本 Skill 的 `scripts/deploy.py install --repo <仓库URL> --checkout <目标目录> --install-skills`。脚本在该目录克隆源码、建立 `.venv`、安装依赖、受控启动服务，并从可连接手机下载资料后开启后续同步。调用本部署 Skill 恢复私有 Skills 时，`--install-skills` 是此次明确的安装请求；用户只要求准备环境时使用 `--no-start`。本地隔离验证可以改用 `--source <已经准备好的独立源码目录>`，它仅复制发布清单列出的文件，不复制运行资料。
 
