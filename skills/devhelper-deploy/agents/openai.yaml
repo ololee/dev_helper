@@ -1,0 +1,4 @@
+interface:
+  display_name: "DevHelper 部署与恢复"
+  short_description: "从 GitHub 安装或更新电脑助手，启动服务并从手机恢复资料"
+  default_prompt: "使用 $devhelper-deploy 安装或更新 DevHelper，并从连接的手机恢复记忆和 Skills。"

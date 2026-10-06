@@ -1,0 +1,14 @@
+DevHelper Desktop
+
+The application source is provided under the MIT License (see LICENSE).
+
+Offline Markdown previews bundle markdown-it 15.0.2, an MIT-licensed browser
+artifact. Its original license, exact source provenance and bundle hash are
+included in static/vendor/markdown-it.LICENSE and
+static/vendor/markdown-it.provenance.json. This project retains the upstream
+browser bundle without changes.
+
+Python packages are installed separately from the declared dependencies in
+pyproject.toml. Their respective license terms apply to those packages. This
+source distribution does not include third-party Python environment files,
+model weights, user memories, private Skills, media attachments or databases.
