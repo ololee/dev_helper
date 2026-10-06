@@ -12,3 +12,9 @@ Python packages are installed separately from the declared dependencies in
 pyproject.toml. Their respective license terms apply to those packages. This
 source distribution does not include third-party Python environment files,
 model weights, user memories, private Skills, media attachments or databases.
+
+Video frame analysis uses an existing FFmpeg executable when available, or the
+binary supplied by the separately installed imageio-ffmpeg package. The wrapper
+is BSD-2-Clause licensed (https://github.com/imageio/imageio-ffmpeg). FFmpeg's
+license depends on that binary's build; consult its bundled license and build
+information. This source repository does not redistribute the executable.

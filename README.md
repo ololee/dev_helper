@@ -106,6 +106,20 @@ python3 scripts/deploy_relay.py --ssh-host 用户@服务器地址 \
 
 脚本任务只运行配置目录中的 Python 或可执行文件，参数按数组传入；不把笔记内容或模型输出直接当作脚本执行。聊天默认返回工具计划，只向模型提供本次选中的工具；主动选择执行后才调用，并保留已完成的动作记录。
 
+## DeepSeek 助手
+
+手机与电脑均可配置自己的 DeepSeek Key。手机有 Key 时直接调用云端，不需要电脑运行模型。默认模型为 `deepseek-flash`，支持文字、图片和工具调用；可以选择思考模式并限制回复长度、工具轮数和调用次数。Key 只保存于当前设备的私有配置，读取接口仅返回是否已配置，不随笔记、记忆、Skills 同步或发布。设置里的“测试连接”会主动发起一条短请求。
+
+助手支持润色、摘要、提取记忆、编写 Skill、规划任务、解释资料、辅助代码和分析媒体。整理结果先作为草稿返回，由用户选择保存为笔记、记忆或 Skill。开启资料检索后，请求会带上启用且自动加载的记忆与 Skills，以及相关检索片段；也可选择具体文档。它沿用现有本地检索和向量存储，不把聊天模型当作 embedding 接口。
+
+图片仅在选中后发送实际图片数据；选中视频时抽取少量画面用于分析，电脑安装依赖时包含 `imageio-ffmpeg` 提供的 FFmpeg，优先使用已有可执行文件。视频分析不能识别未转写的声音，也不上传完整视频。录音继续使用独立 ASR 后端，转写完成后再交给 DeepSeek 提炼。支持情况及未连接设备会在能力接口中明确显示。
+
+可将本次允许的工具加入助手，包括笔记、记忆、Skills、文件、剪贴板、日程、媒体和连接手机的实际工具。默认只生成工具计划；开启执行后才根据工具参数校验结果调用，并显示逐项结果。受控脚本只接受已配置脚本目录里的文件。密钥设置、设备连接设置和递归调用助手不提供给模型。自动日程可调用 `devhelper_workflow_submit` 提交 `chat` 或 `assist` 任务，仍使用任务里明确指定的工具和执行开关。
+
+HTTP 接口：`GET /api/workflows/capabilities` 查询能力与可选工具；`POST /api/workflows/test` 测试已保存的配置；`POST /api/workflows/chat` 同步等待助手结果；`POST /api/workflows/tasks` 提交持久化 `chat`、`assist` 等任务，再查询任务状态。以上同样支持 `/device-api/mac` 与 `/device-api/android` 路由。MCP 对应 `devhelper_workflow_capabilities`、`devhelper_workflow_test`、`devhelper_workflow_chat`、`devhelper_workflow_submit` 和 `devhelper_workflow_run_script`。
+
+`assist` 的 `action` 为 `polish`、`summary`、`extract_memory`、`create_skill`、`plan_tasks`、`explain`、`code` 或 `media`，接受 `message`、`text` 或 `noteId`。聊天和辅助任务共用 `useKnowledge`、`contextDevice`、`documentIds`、`imageIds`、`videoIds`、`allowedTools` 和 `executeTools`；文档最多 8 项、图片最多 4 项、视频最多 2 项。工具选择形式为 `{"device":"mac","name":"knowledge_list_documents"}`，手机本地工具使用 `android`。任务提交代表已排队，只有终态 `succeeded` 才表示处理完成。
+
 Apple Silicon Mac 可按需安装本地 MLX Whisper。先启动电脑版，再明确运行：
 
 ```sh

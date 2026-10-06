@@ -34,6 +34,7 @@
     <button id="tab-home" type="button" role="tab" aria-selected="true" aria-controls="page-home" data-page="home"><svg aria-hidden="true"><use href="#icon-grid"/></svg>工作台</button>
     <button id="tab-library" type="button" role="tab" aria-selected="false" aria-controls="page-library" data-page="library" tabindex="-1"><svg aria-hidden="true"><use href="#icon-folder"/></svg>资料管理</button>
     <button id="tab-notes" type="button" role="tab" aria-selected="false" aria-controls="page-notes" data-page="notes" tabindex="-1"><svg aria-hidden="true"><use href="#icon-memory"/></svg>笔记与录音</button>
+    <button id="tab-ai" type="button" role="tab" aria-selected="false" aria-controls="page-ai" data-page="ai" tabindex="-1"><svg aria-hidden="true"><use href="#icon-memory"/></svg>AI 助手</button>
     <button id="tab-sync" type="button" role="tab" aria-selected="false" aria-controls="page-sync" data-page="sync" tabindex="-1"><svg aria-hidden="true"><use href="#icon-sync"/></svg>资料同步</button>
     <button id="tab-tts" type="button" role="tab" aria-selected="false" aria-controls="page-tts" data-page="tts" tabindex="-1"><svg aria-hidden="true"><use href="#icon-voice"/></svg>语音</button>
     <button id="tab-clipboard" type="button" role="tab" aria-selected="false" aria-controls="page-clipboard" data-page="clipboard" tabindex="-1"><svg aria-hidden="true"><use href="#icon-clipboard"/></svg>共享剪贴板</button>
@@ -93,6 +94,7 @@
       </div>
       <section class="panel sync-conflict-section" aria-labelledby="knowledge-sync-conflict-title"><div class="sync-conflict-heading"><h2 id="knowledge-sync-conflict-title">需要你选择的版本</h2><span id="knowledge-sync-conflict-count" class="badge">尚未检查</span></div><p class="sync-conflict-intro">同一条资料在两端都改过时，分别保留两端内容，直到你选择要用于两端的版本。</p><div id="knowledge-sync-conflict-list" class="sync-conflict-list"><p class="sync-conflict-empty">读取同步状态后，这里会显示需要处理的资料。</p></div></section>
     </section>
+    <section id="page-ai" role="tabpanel" aria-labelledby="tab-ai" hidden><div class="workspace-toolbar"><div class="workspace-heading"><h2>DeepSeek AI 助手</h2><p>对话、整理资料和使用你允许的工具。</p></div><div class="row"><button id="ai-device-mac" type="button">电脑助手</button><button id="ai-device-android" type="button">手机助手</button></div></div><div class="frame-shell"><iframe id="frame-ai-mac" class="app-frame" title="电脑 AI 助手"></iframe><iframe id="frame-ai-android" class="app-frame" title="手机 AI 助手" hidden></iframe></div></section>
     <section id="page-tts" role="tabpanel" aria-labelledby="tab-tts" hidden>
       <div class="workspace-toolbar"><div class="workspace-heading"><h2>语音助手</h2><p>在电脑生成语音，手机和电脑都能输入、试听与下载。</p></div><button id="tts-reload" type="button" class="ghost">重新加载</button></div>
       <div class="frame-shell"><div id="tts-loading" class="frame-loading" role="status" hidden>正在打开语音助手…</div><iframe id="frame-tts" class="app-frame" title="语音助手" allow="autoplay"></iframe></div>
@@ -113,7 +115,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const state = {page:'home', device:'mac', devices:[], config:{androidUrl:'',autoClipboardSync:false}, loaded:{mac:false,android:false,tts:false},notesLoaded:{mac:false,android:false}, pendingSection:{mac:null,android:null}, clipboardBusy:false, clipboardDirty:false, clipboardRequest:0, devicesRequest:0, configRequest:0, configReady:false, loadingDevices:true, lastDevicesError:'', modalFocus:null, knowledgeSync:null,knowledgeSyncBusy:false,knowledgeSyncLoading:false,knowledgeSyncRequest:0};
+  const state = {page:'home', device:'mac', devices:[], config:{androidUrl:'',autoClipboardSync:false}, loaded:{mac:false,android:false,tts:false},aiLoaded:{mac:false,android:false},notesLoaded:{mac:false,android:false}, pendingSection:{mac:null,android:null}, clipboardBusy:false, clipboardDirty:false, clipboardRequest:0, devicesRequest:0, configRequest:0, configReady:false, loadingDevices:true, lastDevicesError:'', modalFocus:null, knowledgeSync:null,knowledgeSyncBusy:false,knowledgeSyncLoading:false,knowledgeSyncRequest:0};
   const capabilityLabels = {clipboard:'剪贴板',clipboard_read:'读取剪贴板',clipboard_write:'写入剪贴板',clipboard_sync:'共享剪贴板',knowledge:'资料管理',memory:'记忆',notes:'笔记',audio:'录音',workflows:'任务助手',skills:'Skills',skill:'Skills',rag:'向量检索',vectors:'向量检索',schedules:'日程',schedule:'日程',resources:'资源管理',files:'文件',file_browse:'文件浏览',media:'媒体处理',media_edit:'媒体编辑',tts:'语音生成',root:'Root 操作',capture:'截屏与录屏',mediaEditing:'媒体编辑',touch:'触摸',screenshot:'截屏',screen_recording:'录屏',recording:'录屏',camera:'摄像头',shell:'命令执行',launch_app:'打开应用',http_mcp:'HTTP MCP',mcp:'MCP 工具'};
   let toastTimer;
   function make(tag, className, text) {const element=document.createElement(tag);if(className)element.className=className;if(text!==undefined)element.textContent=String(text);return element;}
@@ -156,17 +158,17 @@
   function openPage(page) {
     state.page=page;
     for(const button of document.querySelectorAll('[data-page]')){const current=button.dataset.page===page;button.setAttribute('aria-selected',String(current));button.tabIndex=current?0:-1;}
-    for(const name of ['home','library','notes','sync','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
-    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',sync:'资料同步',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
+    for(const name of ['home','library','notes','ai','sync','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
+    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',ai:'AI 助手',sync:'资料同步',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
     $('tab-'+page).scrollIntoView({block:'nearest',inline:'nearest'});
     if(page==='library')renderLibrary();
-    if(page==='notes')renderNotesFrame();
+    if(page==='notes')renderNotesFrame();if(page==='ai')renderAiFrame();
     if(page==='tts'&&!state.loaded.tts){state.loaded.tts=true;$('tts-loading').hidden=false;$('frame-tts').src='/tts/';}
     if(page==='clipboard'&&!state.clipboardDirty)readClipboard();
     if(page==='sync')loadKnowledgeSync();
     if(page==='relay')loadRelay();
   }
-  function selectDevice(id) {if(!['mac','android'].includes(id))return;state.device=id;$('device-select').value=id;renderLibrary();renderNotesFrame();}
+  function selectDevice(id) {if(!['mac','android'].includes(id))return;state.device=id;$('device-select').value=id;renderLibrary();renderNotesFrame();if(state.page==='ai')renderAiFrame();}
   function applyLibrarySection(id) {const section=state.pendingSection[id];if(!section)return;const frame=$('frame-'+id);try{const button=frame.contentDocument?.getElementById('tab-'+section);if(button){button.click();state.pendingSection[id]=null;}}catch{/* A proxy loading error will be shown inside the frame. */}}
   function renderLibrary() {
     const item=device(),online=item?.online===true;$('library-title').textContent=deviceName()+'的资料';$('library-online').textContent=online?'在线':state.loadingDevices?'检查中':'未连接';$('library-online').classList.toggle('online',online);
@@ -181,6 +183,8 @@
     if(!online){$('notes-empty-title').textContent=state.loadingDevices?'正在检查设备':state.device==='android'?'手机尚未连接':'电脑服务暂时不可用';$('notes-empty-message').textContent=item?.error||state.lastDevicesError||(state.device==='android'?'请开启手机服务，并填写手机当前地址。':'刷新设备连接后重试。');$('notes-connect').textContent=state.device==='android'?'连接手机':'刷新连接';}
     else if(state.page==='notes'&&!state.notesLoaded[state.device]){state.notesLoaded[state.device]=true;$('notes-loading').hidden=false;$('frame-notes-'+state.device).src='/device-ui/'+state.device+'/notes';}
   }
+  function renderAiFrame(){for(const id of ['mac','android'])$('frame-ai-'+id).hidden=id!==state.device;if(!state.aiLoaded[state.device]){state.aiLoaded[state.device]=true;$('frame-ai-'+state.device).src='/device-ui/'+state.device+'/notes#ai';}}
+  function aiDirty(id){try{return state.aiLoaded[id]&&typeof $('frame-ai-'+id).contentWindow?.hasUnsavedKnowledgeChanges==='function'&&$('frame-ai-'+id).contentWindow.hasUnsavedKnowledgeChanges();}catch{return false;}}
   function notesDirty(id) {try{const frame=$('frame-notes-'+id);return state.notesLoaded[id]&&typeof frame.contentWindow?.hasUnsavedKnowledgeChanges==='function'&&frame.contentWindow.hasUnsavedKnowledgeChanges();}catch{return false;}}
   function reloadNotesFrame() {if(notesDirty(state.device)&&!window.confirm('笔记页面有未保存的内容或正在进行的录音。重新加载会丢失这些内容，继续吗？'))return;state.notesLoaded[state.device]=false;$('frame-notes-'+state.device).removeAttribute('src');renderNotesFrame();}
   function openLibrary(section) {state.pendingSection[state.device]=section||'memory';openPage('library');}
@@ -269,11 +273,12 @@
   for(const id of ['mac','android'])$('frame-notes-'+id).addEventListener('load',()=>{if(state.device===id&&$('frame-notes-'+id).getAttribute('src'))$('notes-loading').hidden=true;});
   $('notes-reload').addEventListener('click',reloadNotesFrame);$('notes-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());
   $('frame-tts').addEventListener('load',()=>{$('tts-loading').hidden=true;});
+  $('ai-device-mac').addEventListener('click',()=>{selectDevice('mac');renderAiFrame();});$('ai-device-android').addEventListener('click',()=>{selectDevice('android');renderAiFrame();});
   $('device-select').addEventListener('change',event=>selectDevice(event.target.value));$('devices-refresh').addEventListener('click',refreshDevices);$('connect-open').addEventListener('click',openConnection);$('library-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());$('library-reload').addEventListener('click',reloadLibrary);$('tts-reload').addEventListener('click',()=>{$('tts-loading').hidden=false;$('frame-tts').src='/tts/';state.loaded.tts=true;});$('auto-sync').addEventListener('change',updateSync);$('clipboard-text').addEventListener('input',()=>{state.clipboardDirty=true;});$('connection-form').addEventListener('submit',saveConnection);$('connect-close').addEventListener('click',closeConnection);$('connect-cancel').addEventListener('click',closeConnection);
   $('connection-modal').addEventListener('click',event=>{if(event.target===$('connection-modal'))closeConnection();});
   document.addEventListener('keydown',event=>{if($('connection-modal').hidden)return;if(event.key==='Escape'){closeConnection();return;}if(event.key==='Tab'){const nodes=Array.from($('connection-modal').querySelectorAll('button,input')).filter(item=>!item.disabled);const first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
   document.querySelector('.tabs').addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;const tabs=Array.from(document.querySelectorAll('[data-page]'));const index=tabs.indexOf(document.activeElement);if(index<0)return;event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;tabs[next].focus();openPage(tabs[next].dataset.page);});
-  window.addEventListener('beforeunload',event=>{if(state.clipboardDirty||frameDirty('mac')||frameDirty('android')||notesDirty('mac')||notesDirty('android')){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('beforeunload',event=>{if(aiDirty('mac')||aiDirty('android')||state.clipboardDirty||frameDirty('mac')||frameDirty('android')||notesDirty('mac')||notesDirty('android')){event.preventDefault();event.returnValue='';}});
   $('auto-sync').disabled=true;renderDevices();Promise.allSettled([loadConfig(),refreshDevices()]);
   setInterval(()=>{if(!document.hidden&&state.page==='home')refreshDevices();},30000);
   setInterval(()=>{if(!document.hidden&&state.page==='sync')loadKnowledgeSync();},10000);

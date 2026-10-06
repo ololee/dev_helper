@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import Desktop, transform_paths
@@ -104,6 +104,37 @@ class ServerTests(unittest.TestCase):
             time.sleep(.02)
         self.assertEqual(saved['lastStatus'], 'completed', saved)
         self.assertEqual(self.client.get('/api/workflows/tasks').status_code, 200)
+
+    def test_ai_capabilities_and_explicit_test_use_scoped_routes(self):
+        capability = {'configured': False, 'model': 'deepseek-flash', 'tools': [], 'features': {'chat': True}}
+        with patch.object(self.desktop.workflows, 'ai_capabilities', AsyncMock(return_value=capability)) as inspect:
+            for prefix in ('', '/device-api/mac'):
+                response = self.client.get(prefix + '/api/workflows/capabilities')
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json(), capability)
+            self.assertEqual(inspect.await_count, 2)
+        with patch.object(self.desktop.workflows, 'test_connection', AsyncMock(return_value={'ok': True, 'content': 'connected'})) as connect:
+            response = self.client.post('/device-api/mac/api/workflows/test', json={})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()['ok'])
+            response = self.client.post('/api/workflows/test', json={'deepseekApiKey': 'must-not-use-inline'})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(connect.await_count, 1)
+
+    def test_plain_ai_content_is_wrapped_as_mcp_structured_result(self):
+        draft = {'content': '# Owned AI draft', 'draftOnly': True, 'executed': []}
+        with patch.object(self.desktop, 'dispatch', AsyncMock(return_value=draft)):
+            value = self.rpc('tools/call', {'name': 'knowledge_get_context', 'arguments': {}})['result']
+            self.assertEqual(value['structuredContent'], draft)
+            self.assertFalse(value['isError'])
+            self.assertEqual(json.loads(value['content'][0]['text']), draft)
+            # The server relay path must produce the same MCP shape.
+            async def relay_call():
+                return await self.desktop.relay_execute({'path': '/mcp', 'body': {
+                    'jsonrpc': '2.0', 'id': 12, 'method': 'tools/call',
+                    'params': {'name': 'knowledge_get_context', 'arguments': {}}}})
+            value = self.client.portal.call(relay_call)['body']['result']
+            self.assertEqual(value['structuredContent'], draft)
 
 
 if __name__ == '__main__':
