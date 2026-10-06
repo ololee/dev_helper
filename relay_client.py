@@ -10,6 +10,7 @@ import json
 import json as jsonlib
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import time
@@ -96,6 +97,8 @@ class RelayClient:
         self.db.execute('CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY,value TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS outgoing(id TEXT PRIMARY KEY,value TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS reply_outbox(id TEXT PRIMARY KEY,server TEXT,workspace TEXT,reply TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS pairing(id TEXT PRIMARY KEY,value TEXT NOT NULL)')
+        (self.root / 'client.sqlite3').chmod(0o600)
         # Never replay an operation whose delivery/execution was interrupted.
         self.db.execute("UPDATE incoming SET state='failed',response=? WHERE state='running'",
                         (json.dumps(dict(status=503, body={'error': 'Interrupted execution; not replayed', 'state': 'delivery_unknown'})),))
@@ -115,6 +118,7 @@ class RelayClient:
         self.stop_event = False
         self.generation = self.config_generation()
         self.changed = asyncio.Event()
+        self.pair_lock = asyncio.Lock()
 
     def config_generation(self):
         # Stable across restarts, so an unchanged pending workflow can resume.
@@ -184,7 +188,132 @@ class RelayClient:
         rows = [json.loads(row[0]) for row in self.db.execute('SELECT value FROM transfers ORDER BY rowid DESC LIMIT 50')]
         return dict(config=self.public_config(), connected=self.online, error=self.error, deviceId=self.device_id,
                     transport=self.last_route, devices=self.peers, transfers=rows,
-                    policy='metadata_auto_content_manual', catalogUpdatedAt=self.last_catalog)
+                    policy='metadata_auto_content_manual', catalogUpdatedAt=self.last_catalog,
+                    pairing=self.latest_pair())
+
+    @staticmethod
+    def public_pair(value):
+        # Receipts, short codes and the resulting workspace never leave this store.
+        fields = ('id', 'serverUrl', 'name', 'state', 'createdAt', 'updatedAt', 'expiresAt', 'localExpiresAt', 'error')
+        return {key: value[key] for key in fields if key in value} | {'succeeded': value['state'] == 'approved'}
+
+    def save_pair(self, value):
+        value['updatedAt'] = int(time.time() * 1000)
+        if value['state'] not in ('pendingApproval', 'waitingNetwork'):
+            value.pop('receiptSecret', None)
+            value.pop('code', None)
+        self.db.execute('INSERT OR REPLACE INTO pairing VALUES(?,?)', (value['id'], json.dumps(value, ensure_ascii=False)))
+        self.db.commit()
+
+    def pair_value(self, pair_id):
+        identifier(pair_id)
+        row = self.db.execute('SELECT value FROM pairing WHERE id=?', (pair_id,)).fetchone()
+        if not row:
+            raise ValueError('配对请求不存在。')
+        return json.loads(row[0])
+
+    def latest_pair(self):
+        row = self.db.execute('SELECT value FROM pairing ORDER BY rowid DESC LIMIT 1').fetchone()
+        return self.public_pair(json.loads(row[0])) if row else None
+
+    def pair_status(self, pair_id):
+        return self.public_pair(self.pair_value(pair_id))
+
+    async def pair(self, fields):
+        if not isinstance(fields, dict) or set(fields) - {'serverUrl', 'code', 'name'}:
+            raise ValueError('请提供服务器地址和手机显示的六位配对码。')
+        root = server_url(fields.get('serverUrl', ''))
+        code, name = fields.get('code'), fields.get('name', self.config['name'])
+        if not isinstance(code, str) or not re.fullmatch(r'[0-9]{6}', code):
+            raise ValueError('请输入手机显示的六位数字配对码。')
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise ValueError('电脑名称需要 1–100 个字符。')
+        async with self.pair_lock:
+            active = [json.loads(row[0]) for row in self.db.execute('SELECT value FROM pairing')]
+            stamp = int(time.time() * 1000)
+            value = next((row for row in active if row['state'] in ('pendingApproval', 'waitingNetwork')
+                          and row['serverUrl'] == root and row.get('code') == code and row['name'] == name
+                          and row['generation'] == self.generation
+                          and (row['submitted'] or row.get('localExpiresAt', row['createdAt'] + 300000) > stamp)), None)
+            if value is None:
+                for row in active:
+                    if row['state'] in ('pendingApproval', 'waitingNetwork'):
+                        row.update(state='cancelled', error='已开始新的配对；旧请求不会更改连接设置。')
+                        self.save_pair(row)
+                value = dict(id=str(uuid.uuid4()), receiptSecret=secrets.token_urlsafe(32), code=code,
+                             serverUrl=root, deviceId=self.device_id, name=name, state='waitingNetwork',
+                             createdAt=stamp, expiresAt=stamp + 300000, localExpiresAt=stamp + 300000,
+                             generation=self.generation, submitted=False)
+                self.save_pair(value)
+        # A retry reuses the same durable receipt and UUID, even after a lost response.
+        return await self.refresh_pair(value['id'])
+
+    async def refresh_pair(self, pair_id):
+        async with self.pair_lock:
+            value = self.pair_value(pair_id)
+            if value['state'] not in ('pendingApproval', 'waitingNetwork'):
+                return self.public_pair(value)
+            if value['generation'] != self.generation or value['deviceId'] != self.device_id:
+                value.update(state='cancelled', error='连接设置已变化；此配对没有覆盖新设置。')
+            elif not value['submitted'] and value.get('localExpiresAt', value['createdAt'] + 300000) <= int(time.time() * 1000):
+                value.update(state='expired', error='配对码已过期，请在手机重新生成。')
+            else:
+                try:
+                    if not value['submitted']:
+                        payload = {key: value[key] for key in ('id', 'receiptSecret', 'code', 'deviceId', 'name')}
+                        payload['platform'] = 'mac'
+                        response = await self.desktop.http.post(value['serverUrl'] + '/api/relay/pairing/join', json=payload, timeout=15, follow_redirects=False)
+                    else:
+                        response = await self.desktop.http.get(value['serverUrl'] + '/api/relay/pairing/requests/' + value['id'],
+                            headers={'X-DevHelper-Pairing': value['receiptSecret']}, timeout=15, follow_redirects=False)
+                    if response.status_code == 429 or response.status_code >= 500:
+                        value.update(state='waitingNetwork', error='中转暂时不可用，稍后自动重试同一配对请求。')
+                    elif response.is_error or response.is_redirect:
+                        value.update(state='failed', error='配对码无效、已过期或请求未被接受，请在手机重新生成。')
+                    else:
+                        result = response.json()
+                        if result.get('state') == 'approved' and 'workspaceId' not in result:
+                            response = await self.desktop.http.get(value['serverUrl'] + '/api/relay/pairing/requests/' + value['id'],
+                                headers={'X-DevHelper-Pairing': value['receiptSecret']}, timeout=15, follow_redirects=False)
+                            response.raise_for_status()
+                            result = response.json()
+                        if result.get('id') != value['id'] or result.get('state') not in ('pendingApproval', 'approved', 'declined', 'expired', 'cancelled'):
+                            raise ValueError('中转返回了无效配对状态。')
+                        value.update(submitted=True, state=result['state'], expiresAt=int(result['expiresAt']))
+                        # Server and computer wall clocks may differ by minutes.
+                        # Only server state determines expiry after submission.
+                        server_time = result.get('serverTime')
+                        if isinstance(server_time, (int, float)) and not isinstance(server_time, bool):
+                            value['localExpiresAt'] = int(time.time() * 1000) + max(0, value['expiresAt'] - int(server_time))
+                        else:
+                            value.pop('localExpiresAt', None)
+                        value.pop('error', None)
+                        if value['state'] == 'approved':
+                            workspace = identifier(result['workspaceId'])
+                            phone = identifier(result['approvingDeviceId'])
+                            # Recheck after the await; a different connection must never be overwritten.
+                            if value['generation'] != self.generation:
+                                value.update(state='cancelled', error='连接设置已变化；此配对没有覆盖新设置。')
+                            else:
+                                self.set_config(dict(serverUrl=value['serverUrl'], workspaceId=workspace,
+                                                     enabled=True, name=value['name'], targetDeviceId=phone))
+                                self.save_pair(value)
+                                try:
+                                    await self.register()
+                                except (httpx.HTTPError, RuntimeError, ValueError):
+                                    self.error = '配对已批准，正在等待中转连接。'
+                except (httpx.HTTPError, KeyError, TypeError, ValueError):
+                    value.update(state='waitingNetwork', error='正在等待中转响应，将重试同一配对请求。')
+            self.save_pair(value)
+            return self.public_pair(value)
+
+    async def pairing_loop(self):
+        while not self.stop_event:
+            rows = [json.loads(row[0]) for row in self.db.execute('SELECT value FROM pairing')]
+            for value in rows:
+                if value['state'] in ('pendingApproval', 'waitingNetwork'):
+                    await self.refresh_pair(value['id'])
+            await asyncio.sleep(3)
 
     async def api(self, method, path, **kwargs):
         if not self.enabled():
@@ -245,7 +374,9 @@ class RelayClient:
         if chosen:
             candidates = [v for v in candidates if v['deviceId'] == chosen]
         if len(candidates) != 1:
-            raise RuntimeError('请选择一个已连接到相同中转的 Android 设备。')
+            if chosen and not candidates:
+                raise RuntimeError('所选手机尚未加入当前中转，请在手机完成配对并保持连接。')
+            raise RuntimeError('请先配对手机；多台手机时请选择要连接的设备。')
         return candidates[0]
 
     async def route(self, mode=None):
@@ -595,7 +726,7 @@ class RelayClient:
 
     def start(self):
         self.stop_event = False
-        self.tasks = [asyncio.create_task(self.heartbeat_loop()), asyncio.create_task(self.inbox_loop()), asyncio.create_task(self.reply_loop())]
+        self.tasks = [asyncio.create_task(self.heartbeat_loop()), asyncio.create_task(self.inbox_loop()), asyncio.create_task(self.reply_loop()), asyncio.create_task(self.pairing_loop())]
 
     async def stop(self):
         self.stop_event = True

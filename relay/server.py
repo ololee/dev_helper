@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -25,6 +26,8 @@ ONLINE_SECONDS = 75
 BLOB_SECONDS = 86400
 REQUEST_SECONDS = 86400
 DELIVERY_SECONDS = 1800
+PAIRING_SECONDS = 300
+PAIRING_ATTEMPT_SECONDS = 900
 
 
 class RelayError(ValueError):
@@ -93,6 +96,13 @@ class RelayStore:
             CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,workspace TEXT,source TEXT,target TEXT,
                 state TEXT,created INTEGER,updated INTEGER,value TEXT,digest TEXT);
             CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,workspace TEXT,created INTEGER,metadata TEXT);
+            CREATE TABLE IF NOT EXISTS pairing_sessions(id TEXT PRIMARY KEY,workspace TEXT,owner TEXT,
+                code_hash TEXT,state TEXT,created INTEGER,expires INTEGER);
+            CREATE TABLE IF NOT EXISTS pairing_requests(id TEXT PRIMARY KEY,session TEXT,device TEXT,
+                platform TEXT,name TEXT,receipt_hash TEXT,digest TEXT,state TEXT,created INTEGER,expires INTEGER);
+            CREATE TABLE IF NOT EXISTS pairing_attempts(ip TEXT,created INTEGER,failed INTEGER);
+            CREATE INDEX IF NOT EXISTS pairing_code ON pairing_sessions(code_hash,state);
+            CREATE INDEX IF NOT EXISTS pairing_ip ON pairing_attempts(ip,created);
         ''')
         with self.db:
             # A process restart cannot establish whether a claimed script or tool ran.
@@ -124,6 +134,146 @@ class RelayStore:
         with self.lock, self.db:
             self.db.execute('INSERT INTO workspaces VALUES(?,?)', (value, now()))
         return {'workspaceId': value, 'protocolVersion': 1}
+
+    @staticmethod
+    def pairing_hash(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    def expire_pairing(self):
+        stamp = now()
+        self.db.execute("UPDATE pairing_sessions SET state='expired' WHERE state='waiting' AND expires<=?", (stamp,))
+        self.db.execute("UPDATE pairing_requests SET state='expired' WHERE state IN ('pendingApproval','approved') AND expires<=?", (stamp,))
+        self.db.execute('DELETE FROM pairing_attempts WHERE created<?', (stamp - PAIRING_ATTEMPT_SECONDS * 1000,))
+
+    def pairing_owner(self, workspace, session_id, device):
+        device = self.require_device(workspace, device)
+        row = self.db.execute('SELECT * FROM pairing_sessions WHERE id=? AND workspace=? AND owner=?',
+                              (identifier(session_id), workspace, device)).fetchone()
+        if row is None:
+            raise RelayError('Pairing is unavailable', 404)
+        return row
+
+    def create_pairing(self, workspace, value):
+        if set(value) != {'deviceId'}:
+            raise RelayError('deviceId is required')
+        with self.lock, self.db:
+            device = self.require_device(workspace, value['deviceId'])
+            metadata = json.loads(self.db.execute('SELECT metadata FROM devices WHERE workspace=? AND id=?', (workspace, device)).fetchone()[0])
+            if metadata['platform'] != 'android':
+                raise RelayError('Create the pairing code on the phone', 403)
+            self.expire_pairing()
+            self.db.execute("UPDATE pairing_requests SET state='cancelled' WHERE state='pendingApproval' AND session IN (SELECT id FROM pairing_sessions WHERE workspace=? AND owner=? AND state='waiting')", (workspace, device))
+            self.db.execute("UPDATE pairing_sessions SET state='cancelled' WHERE workspace=? AND owner=? AND state='waiting'", (workspace, device))
+            for _ in range(100):
+                code = f'{secrets.randbelow(1000000):06d}'
+                code_hash = self.pairing_hash(code)
+                if not self.db.execute("SELECT 1 FROM pairing_sessions WHERE code_hash=? AND state='waiting'", (code_hash,)).fetchone():
+                    break
+            else:
+                raise RelayError('Try generating the pairing code again', 503)
+            session_id, stamp = str(uuid.uuid4()), now()
+            expires = stamp + PAIRING_SECONDS * 1000
+            self.db.execute('INSERT INTO pairing_sessions VALUES(?,?,?,?,?,?,?)', (session_id, workspace, device, code_hash, 'waiting', stamp, expires))
+        return {'id': session_id, 'code': code, 'expiresAt': expires, 'serverTime': stamp, 'state': 'waiting'}
+
+    @staticmethod
+    def pairing_request_metadata(row):
+        return {'id': row['id'], 'pairingId': row['session'], 'deviceId': row['device'],
+                'platform': row['platform'], 'name': row['name'], 'state': row['state'],
+                'createdAt': row['created'], 'expiresAt': row['expires'], 'serverTime': now()}
+
+    def join_pairing(self, value, ip):
+        if set(value) != {'id', 'receiptSecret', 'code', 'deviceId', 'platform', 'name'}:
+            raise RelayError('Provide the pairing code and device details')
+        join_id, device = identifier(value['id']), identifier(value['deviceId'])
+        receipt, code = value['receiptSecret'], value['code']
+        if not isinstance(receipt, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43,128}', receipt):
+            raise RelayError('A private random pairing receipt is required')
+        if value['platform'] != 'mac':
+            raise RelayError('Pair a computer using the phone code')
+        name = display_name(value['name'])
+        if not isinstance(code, str) or not re.fullmatch(r'[0-9]{6}', code):
+            raise RelayError('Enter the six digit code displayed on the phone')
+        receipt_hash = self.pairing_hash(receipt)
+        digest = self.pairing_hash(json.dumps({'device': device, 'name': name, 'receipt': receipt_hash, 'code': self.pairing_hash(code)}, sort_keys=True))
+        error = None
+        with self.lock, self.db:
+            self.expire_pairing()
+            old = self.db.execute('SELECT * FROM pairing_requests WHERE id=?', (join_id,)).fetchone()
+            if old:
+                if not secrets.compare_digest(old['digest'], digest):
+                    raise RelayError('Pairing request already has different details', 409)
+                return self.pairing_request_metadata(old)
+            counts = self.db.execute('SELECT COUNT(*),COALESCE(SUM(failed),0) FROM pairing_attempts WHERE ip=?', (ip,)).fetchone()
+            if counts[0] >= 30 or counts[1] >= 10:
+                raise RelayError('Too many pairing attempts; try again later', 429)
+            session = self.db.execute("SELECT * FROM pairing_sessions WHERE code_hash=? AND state='waiting'", (self.pairing_hash(code),)).fetchone()
+            self.db.execute('INSERT INTO pairing_attempts VALUES(?,?,?)', (ip, now(), int(session is None)))
+            if not session:
+                error = RelayError('Pairing code is invalid or expired', 404)
+            elif self.db.execute("SELECT COUNT(*) FROM pairing_requests WHERE session=? AND state='pendingApproval'", (session['id'],)).fetchone()[0] >= 5:
+                error = RelayError('The phone has pending requests; ask it to create a new code', 429)
+            else:
+                self.db.execute('INSERT INTO pairing_requests VALUES(?,?,?,?,?,?,?,?,?,?)', (join_id, session['id'], device,
+                    'mac', name, receipt_hash, digest, 'pendingApproval', now(), session['expires']))
+                row = self.db.execute('SELECT * FROM pairing_requests WHERE id=?', (join_id,)).fetchone()
+        # Raise after commit so incorrect guesses still count towards the limit.
+        if error:
+            raise error
+        return self.pairing_request_metadata(row)
+
+    def pairing_requests(self, workspace, session_id, device):
+        with self.lock, self.db:
+            self.expire_pairing()
+            session = self.pairing_owner(workspace, session_id, device)
+            rows = self.db.execute('SELECT * FROM pairing_requests WHERE session=? ORDER BY created LIMIT 30', (session['id'],)).fetchall()
+            return {'id': session['id'], 'state': session['state'], 'expiresAt': session['expires'], 'serverTime': now(),
+                    'requests': [self.pairing_request_metadata(row) for row in rows]}
+
+    def decide_pairing(self, workspace, session_id, value):
+        if set(value) != {'deviceId', 'requestId', 'approve'} or not isinstance(value['approve'], bool):
+            raise RelayError('deviceId, requestId and a boolean approve are required')
+        with self.lock, self.db:
+            self.expire_pairing()
+            session = self.pairing_owner(workspace, session_id, value['deviceId'])
+            row = self.db.execute('SELECT * FROM pairing_requests WHERE id=? AND session=?', (identifier(value['requestId']), session['id'])).fetchone()
+            if row is None:
+                raise RelayError('Pairing request is unavailable', 404)
+            state = 'approved' if value['approve'] else 'declined'
+            if row['state'] == state:
+                return self.pairing_request_metadata(row)
+            if session['state'] != 'waiting' or row['state'] != 'pendingApproval':
+                raise RelayError('Pairing is already decided or expired', 409)
+            expires = now() + PAIRING_SECONDS * 1000 if value['approve'] else row['expires']
+            self.db.execute('UPDATE pairing_requests SET state=?,expires=? WHERE id=?', (state, expires, row['id']))
+            if value['approve']:
+                self.db.execute("UPDATE pairing_sessions SET state='approved' WHERE id=?", (session['id'],))
+                self.db.execute("UPDATE pairing_requests SET state='declined' WHERE session=? AND id<>? AND state='pendingApproval'", (session['id'], row['id']))
+            return self.pairing_request_metadata(self.db.execute('SELECT * FROM pairing_requests WHERE id=?', (row['id'],)).fetchone())
+
+    def pairing_status(self, request_id, receipt):
+        if not isinstance(receipt, str) or len(receipt) > 128:
+            raise RelayError('Pairing request is unavailable', 404)
+        with self.lock, self.db:
+            self.expire_pairing()
+            row = self.db.execute('SELECT * FROM pairing_requests WHERE id=?', (identifier(request_id),)).fetchone()
+            if row is None or not secrets.compare_digest(row['receipt_hash'], self.pairing_hash(receipt)):
+                raise RelayError('Pairing request is unavailable', 404)
+            result = self.pairing_request_metadata(row)
+            if row['state'] == 'approved':
+                session = self.db.execute('SELECT workspace,owner FROM pairing_sessions WHERE id=?', (row['session'],)).fetchone()
+                result.update(workspaceId=session['workspace'], approvingDeviceId=session['owner'], protocolVersion=1)
+            return result
+
+    def cancel_pairing(self, workspace, session_id, device):
+        with self.lock, self.db:
+            self.expire_pairing()
+            session = self.pairing_owner(workspace, session_id, device)
+            if session['state'] == 'approved':
+                raise RelayError('Pairing is complete; cancelling a code does not revoke a connected computer', 409)
+            self.db.execute("UPDATE pairing_sessions SET state='cancelled' WHERE id=? AND state='waiting'", (session['id'],))
+            self.db.execute("UPDATE pairing_requests SET state='cancelled' WHERE session=? AND state='pendingApproval'", (session['id'],))
+            return {'id': session['id'], 'state': 'cancelled' if session['state'] == 'waiting' else session['state'], 'expiresAt': session['expires']}
 
     def require_device(self, workspace, device):
         device = identifier(device)
@@ -309,6 +459,9 @@ class RelayStore:
     def prune(self):
         stamp = now()
         with self.lock, self.db:
+            self.expire_pairing()
+            self.db.execute('DELETE FROM pairing_requests WHERE created<? AND expires<?', (stamp - 86400000, stamp))
+            self.db.execute('DELETE FROM pairing_sessions WHERE created<? AND id NOT IN (SELECT session FROM pairing_requests)', (stamp - 86400000,))
             stale = self.db.execute("SELECT id,value FROM requests WHERE (state='pending' AND created<?) OR (state='delivered' AND updated<?)",
                 (stamp - REQUEST_SECONDS * 1000, stamp - DELIVERY_SECONDS * 1000)).fetchall()
             for row in stale:
@@ -368,12 +521,31 @@ class RelayServer:
         try:
             route = request.url.path
             if route == '/health':
-                return JSONResponse({'appId': 'devhelper-relay', 'version': '2.0.0', 'protocolVersion': 1, 'status': 'ok', 'transport': 'http', 'serverTime': now()})
+                return JSONResponse({'appId': 'devhelper-relay', 'version': '2.1.0', 'protocolVersion': 1, 'status': 'ok', 'transport': 'http', 'serverTime': now()})
             if route == '/api/relay/workspaces' and request.method == 'POST':
                 await self.body(request)
                 return JSONResponse(self.store.create_workspace(), 201)
+            if route == '/api/relay/pairing/join' and request.method == 'POST':
+                result = self.store.join_pairing(await self.body(request), request.client.host if request.client else 'unknown')
+                return JSONResponse(result, 202 if result['state'] == 'pendingApproval' else 200, headers={'Cache-Control': 'no-store'})
+            if route.startswith('/api/relay/pairing/requests/') and request.method == 'GET':
+                return JSONResponse(self.store.pairing_status(route.rsplit('/', 1)[1], request.headers.get('x-devhelper-pairing', '')), headers={'Cache-Control': 'no-store'})
             workspace = self.store.workspace(request)
             self.store.prune()
+            if route == '/api/relay/pairing' and request.method == 'POST':
+                return JSONResponse(self.store.create_pairing(workspace, await self.body(request)), 201, headers={'Cache-Control': 'no-store'})
+            if route.startswith('/api/relay/pairing/'):
+                pieces = route.split('/')
+                session_id = pieces[4]
+                if len(pieces) == 6 and pieces[5] == 'requests' and request.method == 'GET':
+                    result = self.store.pairing_requests(workspace, session_id, request.query_params.get('deviceId'))
+                elif len(pieces) == 6 and pieces[5] == 'decision' and request.method == 'POST':
+                    result = self.store.decide_pairing(workspace, session_id, await self.body(request))
+                elif len(pieces) == 5 and request.method == 'DELETE':
+                    result = self.store.cancel_pairing(workspace, session_id, request.query_params.get('deviceId'))
+                else:
+                    raise RelayError('Endpoint not found', 404)
+                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
             if route.startswith('/devices/') and route.endswith('/mcp') and request.method == 'POST':
                 return await self.mcp_gateway(request, workspace)
             if route in ('/api/relay/register', '/api/relay/heartbeat') and request.method == 'POST':
@@ -426,7 +598,8 @@ class RelayServer:
                     return JSONResponse({'id': value['id'], 'deleted': True})
             return JSONResponse({'error': 'Endpoint not found'}, 404)
         except RelayError as error:
-            return JSONResponse({'error': str(error)}, error.status)
+            return JSONResponse({'error': str(error)}, error.status,
+                headers={'Cache-Control': 'no-store'} if request.url.path.startswith('/api/relay/pairing') else None)
         except (ValueError, TypeError) as error:
             return JSONResponse({'error': str(error)[:200]}, 400)
 

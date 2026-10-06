@@ -37,9 +37,11 @@ DevHelper 的公开源码和私有资料分开保存。GitHub 只保存允许发
 
 ## Linux 中转与手动传输
 
-中转默认关闭。只有用户明确提供或确认服务器地址与配对连接码后，才配置 `POST /api/relay/config` 的 `serverUrl`、`workspaceId`、`enabled`、`sameLan`、`name` 与可选 `targetDeviceId`。公开服务器使用 HTTPS；GET 配置与状态只读取脱敏提示，连接码不写入 Markdown、Git 或部署日志。用户明确创建配对空间时可调用 `POST /api/relay/workspace {"serverUrl":"用户地址"}`，将此次返回的私密连接码提供给需要配对的设备。
+中转默认关闭。首次配对使用手机生成的 6 位一次性配对码，不要求用户手输 UUID：在电脑调用 `POST /api/relay/pair {"serverUrl":"用户确认的地址","code":"六位数字","name":"电脑名称"}`，再由用户在手机确认。记录返回的请求 ID，用 `GET /api/relay/pair/请求ID` 或 `/api/relay/status` 查看脱敏状态；pendingApproval 只表示等待手机确认，只有 approved 表示手机已批准，connected 才表示当前中转已连接。配对码五分钟有效且批准后不可复用。网络重试重用本机保存的 UUID 与私密回执，不生成多个请求，不把回执、内部 workspaceId 或短码写到 Markdown、Git、浏览器存储和日志。批准后客户端保存内部凭据、自动连接并选中确认它的手机。
 
-刷新设备或 `/api/relay/catalog?deviceId=UUID` 仅交换缓存元数据，不传录音、正文或剪贴板。手动操作使用 `POST /api/relay/transfer`，指定 `kind`（document、attachment、sync、clipboard）、source/target、需要的文档或附件 `id` 和 `transport`（auto、lan、relay）。先记录返回的任务 ID，再查询 `/api/relay/transfers/ID`；只有 `state=completed` 且 `succeeded=true` 才报告完成，pending、running、delivery_unknown 均不能当成功。原请求可通过 `/api/relay/requests/ID` 查询执行结果，不用重新发送来验证。手机同网开关关闭时强制中转，开启时仅在连接码与设备 UUID 实际校验通过后使用最新局域网地址。
+已有连接配置继续保留，先读取状态，不强迫重新配对。`POST /api/relay/config` 的原有 workspaceId 接口仅用于明确需要的兼容配置；正常界面与新安装均用六位码。公开服务器使用 HTTPS。系统内部仍使用共享的长期配对空间凭据，不声称提供端到端加密或每设备独立密钥。sameLan/name/enabled 和可选 targetDeviceId 可通过配置接口修改；等待配对时用户更改连接配置会取消旧请求，不能覆盖新的选择。
+
+刷新设备或 `/api/relay/catalog?deviceId=UUID` 仅交换缓存元数据，不传录音、正文或剪贴板。手动操作使用 `POST /api/relay/transfer`，指定 `kind`（document、attachment、sync、clipboard）、source/target、需要的文档或附件 `id` 和 `transport`（auto、lan、relay）。先记录返回的任务 ID，再查询 `/api/relay/transfers/ID`；只有 `state=completed` 且 `succeeded=true` 才报告完成，pending、running、delivery_unknown 均不能当成功。原请求可通过 `/api/relay/requests/ID` 查询执行结果，不用重新发送来验证。手机同网开关关闭时强制中转，开启时仅在内部凭据与设备身份实际校验通过后使用最新局域网地址。
 
 后台中转同步只发布元数据，录音与文件按用户选择手动传输；局域网后台也跳过含附件的资料。文件保持 UUID 和 SHA256，流式传输。源设备或服务器中断时保留真实排队/失败状态，禁止自动重放已经送达的工具与脚本。私有中转状态、连接码、文件和证书不随 GitHub 发布，也不进入知识同步。
 

@@ -284,7 +284,7 @@ class RelayClientTests(unittest.IsolatedAsyncioTestCase):
         self.register_peer(False); self.start_phone()
         response = await self.mac.device_request('POST', '/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}})
         tools = response.json()['result']['tools']
-        self.assertEqual(len(tools), 47)
+        self.assertEqual(len(tools), 49)
         self.assertIn('devhelper_relay_transfer', [v['name'] for v in tools])
         initialized = await self.mac.device_request('POST', '/mcp', json={'jsonrpc': '2.0', 'id': 2, 'method': 'initialize', 'params': {}})
         self.assertIn('resources', initialized.json()['result']['capabilities'])
