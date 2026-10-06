@@ -149,7 +149,9 @@ class ClipboardShare:
         # the next observation as a new baseline, not as a copy to echo to the other device.
         self.reset_sync_baseline()
         self.current["error"] = str(error)
-        return {**self.view(), "status": "partial" if written else "error", "partial": bool(written),
+        pending = getattr(error, "value", None)
+        return {**self.view(), "status": pending.get("state", "pending") if pending else ("partial" if written else "error"), "partial": bool(written),
+                **({"request": pending, "succeeded": False} if pending else {}),
                 "writtenDevices": written, "failedDevice": destination, "error": str(error)}
 
     def adopt(self, text: str, source: str):

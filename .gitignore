@@ -14,6 +14,9 @@ control.lock
 .publish-target.json
 .publish-target.tmp
 verification*
+proof/
 .env
 .env.*
 .DS_Store
+
+proof/

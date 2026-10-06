@@ -37,7 +37,7 @@ def valid_path(value):
     path = PurePosixPath(value)
     if path.is_absolute() or not path.parts or '..' in path.parts or str(path) != value:
         return False
-    blocked = {'.git', '.venv', '.asr-venv', 'data', 'shared', '__pycache__', 'build', 'dist', '.env'}
+    blocked = {'.git', '.venv', '.asr-venv', 'data', 'shared', 'proof', '__pycache__', 'build', 'dist', '.env'}
     if any(part in blocked or part.startswith('.env.') or part.endswith('.egg-info') for part in path.parts):
         return False
     if any(part.startswith('verification') or part.endswith(('.log', '.pid', '.sqlite3', '.db', '.pyc')) for part in path.parts):

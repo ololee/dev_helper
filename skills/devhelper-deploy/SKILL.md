@@ -35,6 +35,16 @@ DevHelper 的公开源码和私有资料分开保存。GitHub 只保存允许发
 
 云端转录和 DeepSeek 摘要需要用户为当前设备配置自己的 API 地址与密钥。密钥保存到本机 `data/workflows/config.json`，不得写入仓库、部署输出或私有 Markdown。配置查询是脱敏结果，空白密码输入应省略字段以保留现有值；发送空字符串表示明确清除。只有用户提交对应处理任务时才发送音频或文字到配置的 API。默认聊天只展示工具计划，执行需要本次明确的工具清单和执行请求。
 
+## Linux 中转与手动传输
+
+中转默认关闭。只有用户明确提供或确认服务器地址与配对连接码后，才配置 `POST /api/relay/config` 的 `serverUrl`、`workspaceId`、`enabled`、`sameLan`、`name` 与可选 `targetDeviceId`。公开服务器使用 HTTPS；GET 配置与状态只读取脱敏提示，连接码不写入 Markdown、Git 或部署日志。用户明确创建配对空间时可调用 `POST /api/relay/workspace {"serverUrl":"用户地址"}`，将此次返回的私密连接码提供给需要配对的设备。
+
+刷新设备或 `/api/relay/catalog?deviceId=UUID` 仅交换缓存元数据，不传录音、正文或剪贴板。手动操作使用 `POST /api/relay/transfer`，指定 `kind`（document、attachment、sync、clipboard）、source/target、需要的文档或附件 `id` 和 `transport`（auto、lan、relay）。先记录返回的任务 ID，再查询 `/api/relay/transfers/ID`；只有 `state=completed` 且 `succeeded=true` 才报告完成，pending、running、delivery_unknown 均不能当成功。原请求可通过 `/api/relay/requests/ID` 查询执行结果，不用重新发送来验证。手机同网开关关闭时强制中转，开启时仅在连接码与设备 UUID 实际校验通过后使用最新局域网地址。
+
+后台中转同步只发布元数据，录音与文件按用户选择手动传输；局域网后台也跳过含附件的资料。文件保持 UUID 和 SHA256，流式传输。源设备或服务器中断时保留真实排队/失败状态，禁止自动重放已经送达的工具与脚本。私有中转状态、连接码、文件和证书不随 GitHub 发布，也不进入知识同步。
+
+用户明确要求部署 Linux 中转时，复用已有源码，不克隆其他仓库。使用仓库 `scripts/deploy_relay.py --ssh-host 用户@地址 --identity-file 本机私钥 --public-ip 用户确认IP --agree-tos`；先用 `--staging` 验证测试部署，再申请正式证书。服务器需要 Python 3.11，默认 SSH 22 与公网 80/443 端口；脚本只上传固定服务文件，建立专用 systemd 服务及每 12 小时续期检查，续期热加载证书。后续源码更新用 `--update-only`。SSH 私钥与证书绝不复制到公开仓库；实际地址只保存在运行配置，不把用户的服务器预设成其他安装的默认地址。
+
 ## 源码更新与 GitHub
 
 用户要求“每次更新同步 GitHub”时，将发布作为此开发工作流的最后一步：完成源码、验证和隐私排除检查，再使用仓库的显式发布脚本。只推送明确配置并获准使用的仓库与分支，只提交发布清单中的代码文件，检查 staged diff 后执行。不得提交运行时资料、日志、测试证明、私人路径或其他未列明文件；不要用 `git add .`。

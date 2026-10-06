@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import uuid
 
 import httpx
+from relay_client import route_mode, BOUND_GENERATION
 import jsonschema
 
 STATES = ('pending', 'running', 'succeeded', 'failed', 'cancelled')
@@ -246,11 +247,17 @@ class WorkflowService:
             'script': {'script', 'args', 'title'},
             'chat': {'message', 'history', 'allowedTools', 'executeTools', 'title'},
         }[kind]
+        allowed.add('transport')
         if set(fields) - allowed:
             raise WorkflowError('Unknown task fields: ' + ', '.join(sorted(set(fields) - allowed)))
+        if fields.get('transport', 'auto') not in ('auto', 'lan', 'relay'):
+            raise WorkflowError('transport must be auto, lan or relay')
         origin = fields.get('origin', fields.get('device', 'mac'))
         if origin not in ('mac', 'android'):
             raise WorkflowError('origin/device must be mac or android')
+        relay = getattr(self.desktop, 'relay', None)
+        if relay and relay.enabled():
+            fields['_relayGeneration'] = relay.generation
         if 'title' in fields:
             fields['title'] = _text(fields['title'], 'title', 200, True)
         if kind in ('transcribe', 'summarize'):
@@ -419,6 +426,15 @@ class WorkflowService:
         return saved
 
     async def _execute(self, task):
+        generation = task['fields'].get('_relayGeneration')
+        token = BOUND_GENERATION.set(generation)
+        try:
+            with route_mode(task['fields'].get('transport', 'auto')):
+                return await self._execute_routed(task)
+        finally:
+            BOUND_GENERATION.reset(token)
+
+    async def _execute_routed(self, task):
         fields, kind = task['fields'], task['type']
         if kind == 'tool':
             self._phase(task, 'tool', 'Executing the explicitly selected tool.')
@@ -626,6 +642,14 @@ class WorkflowService:
         return result
 
     async def chat(self, fields):
+        relay = getattr(self.desktop, 'relay', None)
+        token = BOUND_GENERATION.set(relay.generation if relay and relay.enabled() else None)
+        try:
+            return await self._chat_direct(fields)
+        finally:
+            BOUND_GENERATION.reset(token)
+
+    async def _chat_direct(self, fields):
         # Direct chat requests receive the same durable interruption policy as
         # queued chat tasks. They are claimed before the first await.
         self._chat_input(fields)
@@ -635,7 +659,8 @@ class WorkflowService:
             task.update(status='running', phase='chat')
             self._save(task)
         try:
-            result = await self._chat_run(fields, lambda value: self._phase(task, 'chat-tools', 'Chat tool progress preserved.', value))
+            with route_mode(fields.get('transport', 'auto')):
+                result = await self._chat_run(fields, lambda value: self._phase(task, 'chat-tools', 'Chat tool progress preserved.', value))
             if self._get(task['id'])['status'] == 'cancelled':
                 raise asyncio.CancelledError()
             result['taskId'] = task['id']
@@ -652,7 +677,7 @@ class WorkflowService:
             raise
 
     async def _chat_run(self, fields, progress=None):
-        if not isinstance(fields, dict) or set(fields) - {'type', 'message', 'history', 'allowedTools', 'executeTools', 'title'}:
+        if not isinstance(fields, dict) or set(fields) - {'type', 'message', 'history', 'allowedTools', 'executeTools', 'title', 'transport', '_relayGeneration'}:
             raise WorkflowError('Unknown chat fields')
         message, history, approved, execute = self._chat_input(fields)
         mapping, definitions = {}, []
@@ -716,12 +741,12 @@ class WorkflowService:
     def tool_specs():
         def spec(name, description, properties=None, required=(), read_only=True):
             return dict(name=name, description=description, inputSchema=dict(type='object', properties=properties or {}, required=list(required), additionalProperties=False), annotations=dict(readOnlyHint=read_only, destructiveHint=not read_only, idempotentHint=read_only, openWorldHint=True))
-        task = dict(type={'enum': list(KINDS)}, origin={'enum': ['mac', 'android']}, attachmentId={'type': 'string'}, noteId={'type': 'string'}, expectedRevision={'type': 'integer'}, summarize={'type': 'boolean'}, title={'type': 'string'}, text={'type': 'string'}, device={'enum': ['mac', 'android']}, toolName={'type': 'string'}, arguments={'type': 'object'}, script={'type': 'string'}, args={'type': 'array', 'items': {'type': 'string'}}, message={'type': 'string'}, history={'type': 'array'}, allowedTools={'type': 'array'}, executeTools={'type': 'boolean'})
+        task = dict(type={'enum': list(KINDS)}, origin={'enum': ['mac', 'android']}, transport={'enum': ['auto', 'lan', 'relay']}, attachmentId={'type': 'string'}, noteId={'type': 'string'}, expectedRevision={'type': 'integer'}, summarize={'type': 'boolean'}, title={'type': 'string'}, text={'type': 'string'}, device={'enum': ['mac', 'android']}, toolName={'type': 'string'}, arguments={'type': 'object'}, script={'type': 'string'}, args={'type': 'array', 'items': {'type': 'string'}}, message={'type': 'string'}, history={'type': 'array'}, allowedTools={'type': 'array'}, executeTools={'type': 'boolean'})
         return [spec('devhelper_workflow_config', 'Read redacted processing configuration. Recordings are saved until an explicit task.', {}),
                 spec('devhelper_workflow_submit', 'Explicitly queue transcription/note, summary, selected tool, configured script or chat. Queued is not completed.', task, ('type',), False),
                 spec('devhelper_workflow_tasks', 'List background tasks or read one including result and failure.', {'id': {'type': 'string'}, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}),
                 spec('devhelper_workflow_cancel', 'Cancel a queued/running task. Completed external actions cannot be undone.', {'id': {'type': 'string'}}, ('id',), False),
-                spec('devhelper_workflow_chat', 'Chat using configured DeepSeek. Only explicitly allowed tools are offered; default returns a plan. executeTools requires explicit user initiation.', {key: task[key] for key in ('message', 'history', 'allowedTools', 'executeTools')}, ('message',), False)]
+                spec('devhelper_workflow_chat', 'Chat using configured DeepSeek. Only explicitly allowed tools are offered; default returns a plan. executeTools requires explicit user initiation.', {key: task[key] for key in ('message', 'history', 'allowedTools', 'executeTools', 'transport')}, ('message',), False)]
 
     async def call_tool(self, name, arguments=None):
         fields = arguments or {}

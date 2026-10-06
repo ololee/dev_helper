@@ -21,6 +21,10 @@ class SyncConflict(RuntimeError):
     pass
 
 
+class DeferredMedia(RuntimeError):
+    pass
+
+
 class KnowledgeSync:
     def __init__(self, desktop, state_path: Path):
         self.desktop = desktop
@@ -49,11 +53,8 @@ class KnowledgeSync:
             phoneOnline=self.phone_online, phoneAddress=self.desktop.android_url)
 
     async def remote(self, method, path, data=None):
-        origin = await self.desktop.find_android()
-        self.phone_online = bool(origin)
-        if not origin:
-            raise RuntimeError("手机未连接，私有资料保留在当前设备；请开启手机 DevHelper。")
-        response = await self.desktop.http.request(method, origin + "/api/knowledge/" + path, json=data, timeout=30)
+        response = await self.request(method, "/api/knowledge/" + path, json=data, timeout=120)
+        self.phone_online = True
         if response.status_code == 404 and path == "sync/manifest":
             raise RuntimeError("手机需要更新到支持资料同步的 DevHelper 1.8.1。")
         if response.status_code == 409:
@@ -62,6 +63,16 @@ class KnowledgeSync:
         if response.is_error:
             raise RuntimeError(str(value.get("error", "手机同步请求失败"))[:300])
         return value
+
+    async def request(self, method, path, **kwargs):
+        if hasattr(self.desktop, "device_request"):
+            return await self.desktop.device_request(method, path, **kwargs)
+        origin = await self.desktop.find_android()
+        if not origin:
+            raise RuntimeError("手机未连接，私有资料保留在当前设备；请开启手机 DevHelper。")
+        stream = kwargs.pop("stream", False)
+        request = self.desktop.http.build_request(method, origin + path, **kwargs)
+        return await self.desktop.http.send(request, stream=stream)
 
     async def manifest(self, side):
         value = await asyncio.to_thread(self.store.sync_manifest) if side == "mac" else await self.remote("GET", "sync/manifest")
@@ -99,8 +110,7 @@ class KnowledgeSync:
             existing = None
         except RuntimeError:
             # A missing Android attachment is its documented 404 JSON response.
-            origin = await self.desktop.find_android()
-            check = await self.desktop.http.get(origin + "/api/knowledge/attachments/" + identifier, timeout=15)
+            check = await self.request("GET", "/api/knowledge/attachments/" + identifier, timeout=120)
             if check.status_code != 404:
                 raise
             existing = None
@@ -115,21 +125,22 @@ class KnowledgeSync:
                     while chunk := await asyncio.to_thread(original.read, 65536):
                         await asyncio.to_thread(stream.write, chunk)
             else:
-                origin = await self.desktop.find_android()
-                async with self.desktop.http.stream("GET", origin + "/api/knowledge/attachments/" + identifier + "/content", timeout=120) as response:
+                response = await self.request("GET", "/api/knowledge/attachments/" + identifier + "/content", timeout=300, stream=True)
+                try:
                     response.raise_for_status()
                     async for chunk in response.aiter_bytes(65536):
                         await asyncio.to_thread(stream.write, chunk)
+                finally:
+                    await response.aclose()
             stream.seek(0)
             if destination == "mac":
                 await asyncio.to_thread(self.store.sync_import_attachment, identifier, metadata["sha256"], stream,
                                         metadata["name"], metadata["mimeType"], metadata["bytes"])
             else:
-                origin = await self.desktop.find_android()
                 async def chunks():
                     while chunk := await asyncio.to_thread(stream.read, 65536):
                         yield chunk
-                response = await self.desktop.http.post(origin + "/api/knowledge/sync/attachments/" + identifier,
+                response = await self.request("POST", "/api/knowledge/sync/attachments/" + identifier,
                     params=dict(sha256=metadata["sha256"], name=metadata["name"]), content=chunks(),
                     headers={"content-type": metadata["mimeType"], "content-length": str(metadata["bytes"])}, timeout=300)
                 if response.status_code == 409:
@@ -138,7 +149,7 @@ class KnowledgeSync:
                     raise RuntimeError("附件传输失败，未提交引用该附件的文档。")
         return 1
 
-    async def transfer(self, source, destination, identifier, source_hash, destination_hash):
+    async def transfer(self, source, destination, identifier, source_hash, destination_hash, manual_media=True):
         record = await self.record(source, identifier)
         if record["hash"] != source_hash:
             raise SyncConflict("源资料在同步期间已修改，请重新比较。")
@@ -150,6 +161,8 @@ class KnowledgeSync:
             if re.search(r"/(?:artifacts/|api/knowledge/resources/artifact/)", document["content"]):
                 raise RuntimeError("这条资料引用了原始采集文件，请先在手机上将素材插入为文档附件后同步。")
             identifiers = sorted({str(uuid.UUID(value)) for value in ATTACHMENT.findall(document["content"])})
+            if identifiers and not manual_media:
+                raise DeferredMedia("这条资料包含附件，需要手动同步。")
             for attachment in identifiers:
                 attachments += await self.transfer_attachment(source, destination, attachment)
             portable = dict(deleted=False, document=document)
@@ -173,14 +186,14 @@ class KnowledgeSync:
         return dict(id=identifier, title=(left or right or {}).get("title", "删除的资料"), kind=(left or right or {}).get("kind", "memory"), reason=reason,
                     mac=await detail("mac", left), android=await detail("android", right))
 
-    async def run(self, direction="bidirectional"):
+    async def run(self, direction="bidirectional", identifiers=None, manual_media=True):
         if direction not in ("bidirectional", "download"):
             raise ValueError("请选择双向同步或仅从手机下载。")
         if self.lock.locked():
             raise RuntimeError("资料同步正在进行，请稍候。")
         async with self.lock:
             self.running = True
-            summary = dict(uploaded=0, downloaded=0, deleted=0, unchanged=0, conflicts=0, attachments=0)
+            summary = dict(uploaded=0, downloaded=0, deleted=0, unchanged=0, conflicts=0, attachments=0, deferredMedia=0)
             conflicts = []
             try:
                 local, remote = await self.manifest("mac"), await self.manifest("android")
@@ -190,7 +203,10 @@ class KnowledgeSync:
                     peer.update(base={}, localStoreId=local["storeId"])
                 base = peer["base"]
                 left, right = ({row["id"]: row for row in manifest["records"]} for manifest in (local, remote))
-                for identifier in sorted(set(left) | set(right)):
+                selected = set(left) | set(right)
+                if identifiers is not None:
+                    selected &= {str(uuid.UUID(value)) for value in identifiers}
+                for identifier in sorted(selected):
                     l, r = left.get(identifier), right.get(identifier)
                     lh, rh = l["hash"] if l else None, r["hash"] if r else None
                     if lh == rh:
@@ -217,12 +233,14 @@ class KnowledgeSync:
                         continue
                     source_hash, destination_hash = (lh, rh) if source == "mac" else (rh, lh)
                     try:
-                        summary["attachments"] += await self.transfer(source, destination, identifier, source_hash, destination_hash)
+                        summary["attachments"] += await self.transfer(source, destination, identifier, source_hash, destination_hash, manual_media=manual_media)
                         base[identifier] = source_hash
                         summary["uploaded" if source == "mac" else "downloaded"] += 1
                         if source_hash == "deleted":
                             summary["deleted"] += 1
                         self.persist()
+                    except DeferredMedia:
+                        summary["deferredMedia"] += 1
                     except SyncConflict as error:
                         # Fresh details avoid presenting the stale versions as choices.
                         fresh_local, fresh_remote = await self.manifest("mac"), await self.manifest("android")
@@ -273,10 +291,15 @@ class KnowledgeSync:
         while True:
             try:
                 config = self.desktop.preferences.get()
+                relay = getattr(self.desktop, "relay", None)
+                if relay and relay.enabled():
+                    # Relay connection/background synchronization exchanges metadata only.
+                    await asyncio.sleep(10)
+                    continue
                 # New computer recovery copies from the phone and cannot publish emptiness.
                 fresh = not self.state["initialized"] and self.store.document_stats()["totalDocuments"] == 0
                 if (fresh or config.get("autoKnowledgeSync", False)) and not self.lock.locked():
-                    await self.run("download" if fresh else "bidirectional")
+                    await self.run("download" if fresh else "bidirectional", manual_media=False)
             except Exception as error:
                 self.state["error"] = str(error)[:500]
             await asyncio.sleep(10)
