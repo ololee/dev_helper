@@ -35,7 +35,7 @@ def valid_path(value):
     if not isinstance(value, str) or not value or '\\' in value:
         return False
     path = PurePosixPath(value)
-    if path.is_absolute() or '..' in path.parts or str(path) != value:
+    if path.is_absolute() or not path.parts or '..' in path.parts or str(path) != value:
         return False
     blocked = {'.git', '.venv', 'data', 'shared', '__pycache__', 'build', 'dist', '.env'}
     if any(part in blocked or part.startswith('.env.') or part.endswith('.egg-info') for part in path.parts):
@@ -47,24 +47,58 @@ def valid_path(value):
     return True
 
 
-def read_manifest():
-    value = json.loads(MANIFEST.read_text(encoding='utf-8'))
+def manifest_paths(value):
     files = value['files']
-    if not isinstance(files, list) or len(files) != len(set(files)) or not all(valid_path(v) for v in files):
+    if not isinstance(files, list) or not all(valid_path(v) for v in files) or len(files) != len(set(files)):
         raise ValueError('The publish manifest has unsafe or duplicate paths')
     if 'publish-files.json' not in files:
         raise ValueError('The manifest must include itself')
+    return set(files)
+
+
+def check_portable_source(relative, content):
+    target = PurePosixPath(relative)
+    if target.suffix in ('.py', '.md', '.json', '.toml', '.html', '.yaml', '.command') or target.name in ('.gitignore', 'LICENSE', 'NOTICE'):
+        private_component = rb'[^/\s"\']+/'
+        if re.search(b'/' + b'Users' + b'/' + private_component, content) or re.search(b'/' + b'home' + b'/' + private_component, content):
+            raise ValueError('A public source file contains a user-specific absolute path: ' + relative)
+
+
+def read_manifest():
+    files = manifest_paths(json.loads(MANIFEST.read_text(encoding='utf-8')))
     for relative in files:
         target = ROOT / relative
-        if target.is_symlink() or not target.is_file():
+        if target.is_symlink() or not target.is_file() or ROOT.resolve() not in target.resolve().parents:
             raise ValueError('A manifest source file is missing or a symlink: ' + relative)
         # Public code must be portable and must not disclose private paths.
-        if target.suffix in ('.py', '.md', '.json', '.toml', '.html', '.yaml', '.command') or target.name in ('.gitignore', 'LICENSE', 'NOTICE'):
-            content = target.read_bytes()
-            private_component = rb'[^/\s"\']+/'
-            if re.search(b'/' + b'Users' + b'/' + private_component, content) or re.search(b'/' + b'home' + b'/' + private_component, content):
-                raise ValueError('A public source file contains a user-specific absolute path: ' + relative)
-    return set(files)
+        check_portable_source(relative, target.read_bytes())
+    return files
+
+
+def check_publish_history():
+    """A clean latest tree must not conceal private files in earlier commits."""
+    checked_blobs = set()
+    commits = run(['git', 'rev-list', 'HEAD'], True).splitlines()
+    for raw_commit in commits:
+        commit = raw_commit.decode('ascii')
+        try:
+            allowed = manifest_paths(json.loads(run(['git', 'show', commit + ':publish-files.json'], True)))
+        except (subprocess.CalledProcessError, ValueError, KeyError, TypeError) as failed:
+            raise ValueError('A reachable commit has no valid public manifest: ' + commit[:12]) from failed
+        entries = run(['git', 'ls-tree', '-r', '-z', commit], True).split(b'\0')
+        for entry in entries:
+            if not entry:
+                continue
+            metadata, encoded_path = entry.split(b'\t', 1)
+            mode, kind, object_id = metadata.split(b' ')
+            relative = encoded_path.decode('utf-8')
+            if relative not in allowed or mode not in (b'100644', b'100755') or kind != b'blob':
+                raise ValueError('A reachable commit includes a non-public source file: ' + commit[:12] + ': ' + relative)
+            key = (relative, object_id)
+            if key not in checked_blobs:
+                check_portable_source(relative, run(['git', 'cat-file', 'blob', object_id.decode('ascii')], True))
+                checked_blobs.add(key)
+    return len(commits)
 
 
 def previous_manifest():
@@ -151,6 +185,7 @@ def main():
         config = configured_target()
         if changed_paths():
             raise ValueError('Commit reviewed source changes before uploading; the worktree must be clean')
+        check_publish_history()
         run(['git', 'push', 'origin', config['branch']])
         print(json.dumps({'pushed': True, 'repository': config['repositoryUrl'], 'branch': config['branch']}))
     else:

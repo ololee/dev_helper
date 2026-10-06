@@ -76,6 +76,48 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publish.configured_target()
 
+    def commit(self, message):
+        subprocess.run(['git', 'add', '--', 'server.py', 'publish-files.json'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', message], cwd=self.root, check=True)
+
+    def test_history_accepts_only_allowlisted_public_commits(self):
+        self.commit('Initial public source')
+        (self.root / 'server.py').write_text('print("Updated public source")\n')
+        self.commit('Update source')
+        self.assertEqual(publish.check_publish_history(), 2)
+
+    def test_deleted_private_history_blocks_before_push(self):
+        self.commit('Initial public source')
+        (self.root / 'private-notes.md').write_text('synthetic private content')
+        subprocess.run(['git', 'add', '--', 'private-notes.md'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'Accidental extra file'], cwd=self.root, check=True)
+        subprocess.run(['git', 'rm', '-q', '--', 'private-notes.md'], cwd=self.root, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'Remove extra file'], cwd=self.root, check=True)
+        self.assertEqual(publish.changed_paths(), set())
+        original_run = publish.run
+        def guarded_run(argv, capture=False):
+            if argv[:2] == ['git', 'push']:
+                raise AssertionError('A blocked publication attempted network access')
+            return original_run(argv, capture)
+        with patch.object(publish, 'run', guarded_run), patch.object(publish, 'configured_target', return_value={'branch': 'main'}), patch('sys.argv', ['publish.py', '--push']):
+            with self.assertRaisesRegex(ValueError, 'non-public source file'):
+                publish.main()
+
+    def test_private_path_in_replaced_source_history_is_rejected(self):
+        private_path = '/' + 'Users' + '/example-account/private.txt'
+        (self.root / 'server.py').write_text('PATH=' + repr(private_path))
+        self.commit('Old non-portable source')
+        (self.root / 'server.py').write_text('print("public source")\n')
+        self.commit('Replace source')
+        publish.read_manifest()
+        with self.assertRaisesRegex(ValueError, 'user-specific absolute path'):
+            publish.check_publish_history()
+
+    def test_invalid_manifest_data_returns_a_clear_error(self):
+        for files in ([{}], [['server.py']], ['server.py', 'server.py']):
+            with self.assertRaises(ValueError):
+                publish.manifest_paths({'files': files})
+
 
 if __name__ == '__main__':
     unittest.main()

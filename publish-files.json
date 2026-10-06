@@ -27,6 +27,7 @@
     "sync.py",
     "tests/test_clipboard.py",
     "tests/test_control.py",
+    "tests/test_deploy.py",
     "tests/test_knowledge.py",
     "tests/test_publish.py",
     "tests/test_server.py",

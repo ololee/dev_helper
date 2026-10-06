@@ -128,6 +128,8 @@ def restore(base, phone=None, install_skills=False):
     if 'conflicts' in result:
         sync_summary['conflicts'] = len(result['conflicts']) if isinstance(result['conflicts'], (dict, list)) else result['conflicts']
     skills_summary = {k: v for k, v in (materialized or {}).items() if isinstance(v, (int, bool))}
+    if materialized is not None:
+        skills_summary['errorCount'] = len(materialized.get('errors', []))
     return {'restored': True, 'autoSyncEnabled': True, 'sync': sync_summary,
             'privateSkills': skills_summary if install_skills else None}
 
