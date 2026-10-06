@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import quote, urlsplit, parse_qsl
 
@@ -32,13 +33,14 @@ from knowledge import KnowledgeService
 from sync import KnowledgeSync, SyncConflict
 from private_skills import materialize
 from workflows import WorkflowService, WorkflowError
+from notifications import PhoneNotifications
 from relay_client import RelayClient, RelayPending, DeliveryUnknown, route_mode
 from web_assets import asset_path
 
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 
 def tool_result(value):
@@ -88,6 +90,8 @@ class Desktop:
         self.clipboard = ClipboardShare(self.preferences, self.android_call)
         self.sync = KnowledgeSync(self, data_dir / "sync-state.json")
         self.workflows = WorkflowService(self, data_dir)
+        self.notifications = PhoneNotifications(self.phone_notification_request)
+        self.workflows.bind_phone_notifier(self.notifications.notify)
         self.relay = RelayClient(self, data_dir)
         self.mcp = Server("devhelper-desktop", version=VERSION, instructions=(
             "DevHelper offers local Mac knowledge and Android tools through HTTP. First call "
@@ -97,6 +101,10 @@ class Desktop:
             "tools. Clipboard sharing is text-only and requires an explicit tool call or user-enabled sync. "
             "DeepSeek AI chat and assist use explicitly submitted cloud requests and selected tools. "
             "Call devhelper_workflow_capabilities to inspect available AI features and tool schemas. "
+            "When the user has enabled phone task alerts, call devhelper_notification_notify once after "
+            "verified task completion, with a stable unique eventId and optional nextStep. Read "
+            "devhelper_notification_status first. Respect suppressed/offline results; never retry a "
+            "delivery-unknown alert or change notification settings without the user's request. "
             "TTS runs on the Mac Apple GPU. Never infer a task succeeded from queued status."))
         self.manager = StreamableHTTPSessionManager(
             app=self.mcp, json_response=True, stateless=True,
@@ -141,7 +149,41 @@ class Desktop:
         ]
 
     def tool_specs(self):
-        return self.root_specs() + self.knowledge.tool_specs() + self.workflows.tool_specs()
+        return self.root_specs() + self.knowledge.tool_specs() + self.workflows.tool_specs() + self.notifications.tool_specs()
+
+    async def phone_notification_request(self, device, method, path, body):
+        if device != "android":
+            raise ValueError("任务提醒需要连接手机。")
+        # Alerts are useful while connected; do not store an offline alert for
+        # delivery when the user reconnects hours later.
+        if not await self.find_android(force=True):
+            return {"status": "unavailable", "reason": "phone_unavailable", "delivered": False}
+        options = {"timeout": 8}
+        if method == "POST":
+            options["json"] = body
+        if self.relay.enabled():
+            request_id = str(uuid.uuid4())
+            try:
+                response = await self.relay.request(method, path, request_id=request_id, **options)
+            except (RelayPending, DeliveryUnknown, httpx.HTTPError):
+                # This only cancels our own request; it does not undo delivery.
+                # The phone also checks the alert's short expiry before posting.
+                try:
+                    await self.relay.api("DELETE", "/api/relay/requests/" + request_id,
+                                         params={"sourceId": self.relay.device_id}, timeout=3)
+                except (RuntimeError, httpx.HTTPError):
+                    pass
+                return {"status": "unknown", "reason": "phone_delivery_unconfirmed", "delivered": False}
+        else:
+            response = await self.device_request(method, path, **options)
+        try:
+            response.raise_for_status()
+            value = response.json()
+            if not isinstance(value, dict):
+                raise ValueError("手机提醒接口未返回有效状态。")
+            return value
+        finally:
+            await response.aclose()
 
     async def find_android(self, force=False):
         if self.relay.enabled():
@@ -239,6 +281,10 @@ class Desktop:
     async def _dispatch(self, device, name, arguments):
         if device not in ("mac", "android"):
             raise ValueError("请选择电脑或手机。")
+        # Notification delivery uses the same short-lived, connected-phone
+        # route for both catalogs rather than queuing a generic Android RPC.
+        if name.startswith("devhelper_notification_"):
+            return await self.notifications.call_tool(name, arguments)
         if device == "android":
             return await self.phone_rpc("tools/call", dict(name=name, arguments=arguments))
         if name == "devhelper_relay_config":
@@ -462,6 +508,12 @@ class Desktop:
                 raise WorkflowError("Task parameters must be a JSON object")
             if path == "/api/workflows/config":
                 value = self.workflows.set_config(data) if request.method == "POST" else self.workflows.public_config()
+            elif path == "/api/workflows/notifications/config" and request.method in ("GET", "POST"):
+                value = await self.notifications.config(data if request.method == "POST" else None)
+            elif path == "/api/workflows/notifications/status" and request.method == "GET":
+                value = await self.notifications.status()
+            elif path == "/api/workflows/notifications/notify" and request.method == "POST":
+                value = await self.notifications.notify(data)
             elif path == "/api/workflows/capabilities" and request.method == "GET":
                 value = await self.workflows.ai_capabilities()
             elif path == "/api/workflows/test" and request.method == "POST":

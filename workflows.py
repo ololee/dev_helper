@@ -105,7 +105,8 @@ class WorkflowService:
                            language='zh', deepseekUrl='https://api.deepseek.com', deepseekApiKey='',
                            deepseekModel='deepseek-flash', deepseekThinking='disabled', deepseekMaxTokens=4096,
                            deepseekMaxToolRounds=6, deepseekMaxToolCalls=12,
-                           scriptsDirectory=str(scripts.resolve()), taskTimeoutSeconds=900)
+                           scriptsDirectory=str(scripts.resolve()), taskTimeoutSeconds=900,
+                           notifyPhoneOnCompletion=False)
         if self.config_path.is_file():
             stored = json.loads(self.config_path.read_text(encoding='utf-8'))
             self.config.update({k: v for k, v in stored.items() if k in self.config})
@@ -117,6 +118,11 @@ class WorkflowService:
                 task.update(status='failed', phase='interrupted', error='Service restarted during execution; the task was not replayed.', updatedAt=_now())
                 task['logs'].append(dict(at=_now(), phase='interrupted', message='Interrupted task requires an explicit new request.'))
                 self.db.execute('UPDATE tasks SET status=?,value=? WHERE id=?', ('failed', json.dumps(task, ensure_ascii=False), identifier))
+            for identifier, raw in self.db.execute('SELECT id,value FROM tasks').fetchall():
+                task = json.loads(raw)
+                if (task.get('notification') or {}).get('status') == 'sending':
+                    task['notification'].update(status='unknown', reason='delivery_interrupted', delivered=False, updatedAt=_now())
+                    self.db.execute('UPDATE tasks SET value=? WHERE id=?', (json.dumps(task, ensure_ascii=False), identifier))
         with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
             os.chmod(self.root / 'tasks.sqlite3', 0o600)
@@ -128,6 +134,13 @@ class WorkflowService:
         self.wake = None
         self.loop = None
         self.stopping = False
+        self.phone_notifier = None
+
+    def bind_phone_notifier(self, notifier):
+        """Attach the device router after server construction, without making a request."""
+        if notifier is not None and not callable(notifier):
+            raise TypeError('The phone notifier must be callable')
+        self.phone_notifier = notifier
 
     def _redact(self, value):
         if isinstance(value, dict):
@@ -165,7 +178,10 @@ class WorkflowService:
             for name, value in fields.items():
                 limits = {'taskTimeoutSeconds': (5, 7200), 'deepseekMaxTokens': (512, 16384),
                           'deepseekMaxToolRounds': (1, 12), 'deepseekMaxToolCalls': (1, 32)}
-                if name in limits:
+                if name == 'notifyPhoneOnCompletion':
+                    if not isinstance(value, bool):
+                        raise WorkflowError('notifyPhoneOnCompletion must be boolean')
+                elif name in limits:
                     low, high = limits[name]
                     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                         raise WorkflowError(name + ' must be between ' + str(low) + ' and ' + str(high))
@@ -220,6 +236,65 @@ class WorkflowService:
             if not found:
                 raise WorkflowError('Task not found', 404)
             return json.loads(found[0])
+
+    async def _notify_completion(self, task):
+        """Claim each completed event durably before its one optional delivery attempt.
+
+        A response may be lost after the phone has posted the notification. Such
+        events are recorded as unknown and are never replayed by polling or restart.
+        Notification failure cannot change a completed workflow into a failed one.
+        """
+        now = _now()
+        with self.lock:
+            current = self._get(task['id'])
+            if current['status'] != 'succeeded' or 'notification' in current:
+                return
+            event = 'workflow:mac:' + current['id'] + ':completed'
+            enabled = self.config['notifyPhoneOnCompletion'] is True
+            notifier = self.phone_notifier
+            notice = dict(eventId=event, attemptedAt=now, updatedAt=now,
+                          status='sending' if enabled and notifier else 'skipped', delivered=False)
+            if not enabled:
+                notice['reason'] = 'completion_alerts_disabled'
+            elif notifier is None:
+                notice['reason'] = 'phone_notifier_unavailable'
+            current['notification'] = notice
+            self._save(current)
+        if not enabled or notifier is None:
+            return
+        explicit_title = current.get('fields', {}).get('title')
+        safe_title = ''.join(char if ord(char) >= 32 and not 127 <= ord(char) <= 159 else ' ' for char in self._redact(explicit_title or '任务已完成'))[:120]
+        payload = dict(eventId=event, title=safe_title,
+                       message='电脑上的任务已完成。', nextStep='查看结果，然后告诉助手下一步要做什么。', taskId=current['id'])
+        try:
+            generation = current['fields'].get('_relayGeneration')
+            token = BOUND_GENERATION.set(generation)
+            try:
+                with route_mode(current['fields'].get('transport', 'auto')):
+                    value = await asyncio.wait_for(notifier(payload), timeout=10)
+            finally:
+                BOUND_GENERATION.reset(token)
+            value = _unwrap(value)
+            if not isinstance(value, dict) or not isinstance(value.get('status'), str):
+                result = dict(status='unknown', reason='invalid_phone_response', delivered=False)
+            else:
+                # Keep only delivery facts; do not copy remote content, results,
+                # headers or incidental credentials into the task history.
+                result = {key: self._redact(value[key]) for key in
+                          ('status', 'reason', 'delivered', 'posted', 'suppressed', 'duplicate') if key in value}
+                result['delivered'] = value.get('delivered') is True
+        except asyncio.CancelledError:
+            self._save_notification_result(current['id'], dict(status='unknown', reason='delivery_interrupted', delivered=False))
+            raise
+        except Exception:
+            result = dict(status='unknown', reason='phone_delivery_unconfirmed', delivered=False)
+        self._save_notification_result(current['id'], result)
+
+    def _save_notification_result(self, identifier, result):
+        with self.lock:
+            current = self._get(identifier)
+            current['notification'].update(result, updatedAt=_now())
+            self._save(current)
 
     def get_task(self, identifier):
         return self._redact(self._get(identifier))
@@ -422,6 +497,8 @@ class WorkflowService:
             finally:
                 self.active = None
                 self.active_id = None
+            if self._get(task['id'])['status'] == 'succeeded':
+                await self._notify_completion(task)
 
     async def _document(self, origin, identifier):
         if origin == 'mac':
@@ -972,7 +1049,6 @@ class WorkflowService:
             result['taskId'] = task['id']
             task.update(status='succeeded', phase='done', result=self._redact(result))
             self._save(task)
-            return result
         except BaseException as failed:
             if self._get(task['id'])['status'] != 'cancelled':
                 error = 'Chat interrupted; completed actions were not replayed.' if isinstance(failed, asyncio.CancelledError) else self._redact(str(failed)[:2000])
@@ -981,6 +1057,8 @@ class WorkflowService:
             if isinstance(failed, WorkflowError):
                 failed.result = dict(taskId=task['id'], **(task.get('result') or {}))
             raise
+        await self._notify_completion(task)
+        return result
 
     async def _chat_run(self, fields, progress=None):
         if not isinstance(fields, dict) or set(fields) - (CHAT_FIELDS | {'type', '_relayGeneration'}):

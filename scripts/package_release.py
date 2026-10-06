@@ -10,7 +10,7 @@ import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
 CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'sync.py',
-        'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
+        'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py')
 ASSETS = ('knowledge.html', 'notes.html', 'vendor/markdown-it.min.js', 'vendor/markdown-it.LICENSE',
           'vendor/markdown-it.provenance.json', 'vendor/README.md')
