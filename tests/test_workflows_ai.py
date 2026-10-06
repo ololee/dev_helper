@@ -59,8 +59,9 @@ class AiWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(configured['deepseekMaxToolCalls'], 32)
 
     async def test_connection_is_explicit_small_and_reports_usage(self):
-        with self.assertRaisesRegex(WorkflowError, 'AI settings'):
+        with self.assertRaisesRegex(WorkflowError, 'API Key') as missing:
             await self.service.test_connection()
+        self.assertEqual(missing.exception.status, 400)
         self.assertEqual(self.requests, [])
         self.configure_cloud()
         self.service.set_config({'deepseekThinking': 'enabled'})
