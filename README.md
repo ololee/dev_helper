@@ -2,6 +2,24 @@
 
 使用 Python 在 Mac 上运行同一套设备入口、笔记、记忆、Skills、向量、日程和资源管理。手机可以通过浏览器访问电脑，电脑也可以通过局域网调用已连接手机的 DevHelper。两端分别保存资料，选择设备决定这次查看哪一端；可开启资料同步，换电脑时从手机恢复。公开源码与私有资料分开保存。
 
+## 一次接入其他工程
+
+这台电脑已经运行 DevHelper 时，在其他工程使用同一个 HTTP MCP，不需要在每个工程部署一次服务。Python 3.11+ 执行：
+
+```sh
+python3 /你的DevHelper安装目录/scripts/import_project.py --project "/你的工程目录" --client both
+```
+
+默认接入 `http://127.0.0.1:8876/mcp`，同时添加 Codex 的工程 MCP 配置、Claude Code 的 HTTP MCP 配置和两端的公共 `devhelper-connect` Skill。既有其他 MCP 和设置保留不变；同名配置指向不同服务、非法配置或已手动修改的托管 Skill 会报告冲突，先检查全部目标再写入。重复导入相同配置不会重复添加。仅需一种客户端时使用 `--client codex` 或 `--client claude`。
+
+自定义地址用 `--url "http://当前可访问地址:端口/mcp"`。建议连接电脑版入口，由电脑发现手机的最新地址或使用已配对中转。localhost 始终指运行客户端的那台机器；在另一台电脑、SSH 或云环境不能用它连接这台 Mac，需先部署当地服务或使用该环境可访问的指定地址。中转服务器地址不是可直接替代的 MCP 地址。
+
+`--dry-run` 只检查连接和导入计划，不写文件；`--skip-check` 用于明确准备离线配置，仅生成配置且不声称连通；`--without-skill` 只接入 MCP。导入器只执行健康检查、MCP 初始化和工具目录读取，不调用资料读取工具、不保存或输出初始化上下文、不启动任务。返回的 `verification.status=verified` 表示脚本刚才验证了服务，并不表示已经运行的客户端会话自动获得了新工具。
+
+在目标工程重新打开 Codex 或 Claude Code，完成客户端的正常工程信任或 MCP 批准；Claude Code 可用 `/mcp` 检查连接，Skill 可用 `/devhelper-connect`，Codex 可用 `$devhelper-connect`。工程里只有 HTTP 地址和公共连接 Skill，记忆、私有 Skills 正文、录音、向量和密钥仍通过 DevHelper 管理，不复制进工程或 Git。客户端现有本地配置或组织策略可能影响加载，请检查实际连接；导入器不会修改这些配置或批准设置。
+
+配置格式遵循 [Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[Codex Skills 文档](https://learn.chatgpt.com/docs/build-skills) 和 [Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)。
+
 ## 手机任务完成提醒（2.4.0）
 
 手机原生管理的“设备 → 任务提醒”提供总开关、声音、震动和下一步提示，默认关闭。页面显示通知权限、系统勿扰和通知频道状态，并有明确的测试按钮。系统勿扰开启时整个提醒都会跳过；不会使用 Root 绕过通知权限或系统静音。锁屏只展示通用完成提示，打开通知可查看任务与下一步。系统自身的声音、震动和频道设置仍然生效；“已发送”只表示 Android 接受了通知，不能证明用户已经听到声音。

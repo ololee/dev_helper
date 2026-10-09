@@ -1,6 +1,6 @@
 ---
 name: devhelper-deploy
-description: 从明确指定的 GitHub 仓库安装或更新 DevHelper 电脑版，启动 HTTP MCP、连接手机并恢复 Markdown 笔记、记忆和 Skills；用于换电脑部署、资料恢复或发布已配置仓库的源码更新。
+description: 安装或更新 DevHelper 电脑版，或将已运行的 HTTP MCP 和连接 Skill 接入其他 Codex、Claude Code 工程；也用于换电脑恢复手机资料和发布已配置仓库的源码更新。
 ---
 
 # DevHelper 部署与恢复
@@ -18,6 +18,10 @@ DevHelper 的公开源码和私有资料分开保存。GitHub 只保存允许发
 部署脚本不会登录 GitHub、创建仓库、发布代码或配置后台计划。私有仓库缺少权限时，保留当前安装并报告错误；不要自动切到其他账号或公开仓库。启动和停止使用仓库的 `control.py`，不按端口杀进程。
 
 ## 连接与恢复
+
+同一台电脑的新工程不需要重新部署服务。在已安装源码中运行 `python3 scripts/import_project.py --project 用户指定的工程目录 --client both`，会把已运行的 HTTP MCP 和轻量 `devhelper-connect` Skill 接入 Codex 与 Claude Code。默认地址为 `http://127.0.0.1:8876/mcp`；自定义端口或直接手机连接时传入已确认的 `--url`。仅为 Codex 或 Claude Code 接入时，使用 `--client codex` 或 `--client claude`。用 `--dry-run` 先检查计划；脚本检查实际 HTTP MCP 并保留原工程的其他设置，同名冲突或手动修改的文件会停止导入。`--skip-check` 只适用于用户明确准备离线配置，不能据此声称工具已经连通。
+
+接入后，重新打开目标工程并按客户端提示信任工程或批准 MCP。工程里只保存连接地址、公共连接 Skill 和托管标记；私有资料通过 MCP 读取。不要把手机记忆、私有 Skill 正文、录音、API Key 或中转连接码复制进工程，不把“已写入配置”当作当前会话已注册工具。客户端现有本地配置或组织策略可能影响实际加载；不能通过导入改写它们或绕过批准流程。
 
 先验证助手 `/health` 的 `appId` 是 `devhelper-desktop`，然后查看 `/api/devices`。使用 mDNS 返回的当前手机地址或用户明确给出的地址配置 `/api/config`；不复用写死的历史 IP。Root 权限和手机后台限制由手机服务实际结果决定。
 
