@@ -12,6 +12,19 @@ Device = Literal["mac", "android"]
 HERE = Path(__file__).resolve().parent
 
 
+def decorate_tts_html(source: bytes) -> bytes:
+    """Apply local interaction feedback to the embedded TTS UI, without changing its service."""
+    marker = b'id="devhelper-motion-assets"'
+    if marker in source:
+        return source
+    head = re.search(br'</head\s*>', source, re.IGNORECASE)
+    if head is None:
+        return source
+    assets = (b'<link id="devhelper-motion-assets" rel="stylesheet" href="/api/knowledge/assets/motion.css">'
+              b'<script src="/api/knowledge/assets/motion.js" defer></script>\n')
+    return source[:head.start()] + assets + source[head.start():]
+
+
 def asset_path(name: str) -> Path:
     """Prefer bundled release assets, with the Android checkout as dev fallback."""
     if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):

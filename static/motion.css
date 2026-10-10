@@ -5,6 +5,13 @@ button:not(:disabled):active,[role=button]:not([aria-disabled=true]):active,a.ta
 button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #7d99f3;outline-offset:3px}
 input:not([type=range]),textarea,select{transition:border-color var(--motion-standard) var(--motion-ease),box-shadow var(--motion-standard) var(--motion-ease)}
 details>summary{cursor:pointer}details>summary::marker{color:var(--muted,#637087)}
+.motion-nav-ready{isolation:isolate}
+.motion-nav-ready>[aria-selected]{position:relative;z-index:1}
+.motion-nav-ready>[aria-selected=true]{background:transparent!important;box-shadow:none!important}
+.motion-nav-indicator{position:absolute;left:0;top:0;z-index:0;border-radius:8px;background:var(--motion-nav-color,#EDF1FF);transform-origin:0 0;pointer-events:none!important}
+.modal-backdrop.motion-backdrop-ready{background:transparent!important;isolation:isolate}
+.modal-backdrop.motion-backdrop-ready::before{content:"";position:fixed;inset:0;z-index:-1;background:var(--motion-backdrop-color,rgba(18,24,35,.22));pointer-events:none}
+.motion-mask-exit{position:fixed;inset:0;z-index:2147482999;pointer-events:none!important}
 .motion-exit-proxy,.motion-exit-proxy *{pointer-events:none!important;user-select:none!important}
 .motion-exit-proxy{position:fixed!important;margin:0!important;z-index:2147483000!important;overflow:hidden;contain:layout paint}
 /* Recording is communicated by color and a clock; no decorative looping pulse. */

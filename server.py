@@ -40,7 +40,7 @@ from web_assets import asset_path
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 
 
 def tool_result(value):
@@ -781,6 +781,14 @@ class Desktop:
                     pass
             if "text/html" in kind and tts:
                 raw = raw.replace(b"/api/", b"/tts/api/").replace(b"/audio/", b"/tts/audio/")
+                if response.status_code == 200 and request.method != "HEAD":
+                    from web_assets import decorate_tts_html
+                    decorated = decorate_tts_html(raw)
+                    if decorated != raw:
+                        forwarded.pop("etag", None)
+                        forwarded.pop("last-modified", None)
+                        forwarded["cache-control"] = "no-store"
+                        raw = decorated
             return Response(raw, response.status_code, headers=forwarded)
         return StreamingResponse(response.aiter_bytes(), response.status_code, headers=forwarded,
                                  background=BackgroundTask(response.aclose))

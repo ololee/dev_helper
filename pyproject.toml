@@ -1,6 +1,6 @@
 [project]
 name = "devhelper-desktop"
-version = "2.6.1"
+version = "2.6.2"
 description = "DevHelper desktop and Android workspace over HTTP MCP"
 requires-python = ">=3.11"
 dependencies = [

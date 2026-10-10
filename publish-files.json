@@ -64,6 +64,7 @@
     "tests/test_relay_ui.py",
     "tests/test_server.py",
     "tests/test_sync.py",
+    "tests/test_tts_motion.py",
     "tests/test_web_assets.py",
     "tests/test_workflows.py",
     "tests/test_workflows_ai.py",
