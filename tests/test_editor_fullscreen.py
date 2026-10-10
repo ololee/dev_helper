@@ -56,10 +56,10 @@ if(expandedEditor||focused!==1)process.exit(6);
 const calls=[];const window={location:{protocol:'https:',origin:'https://owned.invalid'},parent:{postMessage:(body,target)=>calls.push({body,target})}};
 """ + self.function(source, 'notifyMediaWorkspace') + """
 notifyMediaWorkspace('attachment-library-modal',true);
-notifyMediaWorkspace('image-edit-modal',true);notifyMediaWorkspace('image-edit-modal',false);
-if(calls.length!==2||calls[0].target!=='https://owned.invalid'||calls[0].body.open!==true||calls[1].body.open!==false)process.exit(1);
-window.location.protocol='file:';notifyMediaWorkspace('video-edit-modal',true);if(calls.length!==2)process.exit(2);
-window.location.protocol='https:';window.parent=window;notifyMediaWorkspace('image-edit-modal',true);if(calls.length!==2)process.exit(3);
+notifyMediaWorkspace('image-edit-modal',true);notifyMediaWorkspace('image-edit-modal',false);notifyMediaWorkspace('audio-edit-modal',true);
+if(calls.length!==3||calls[0].target!=='https://owned.invalid'||calls[0].body.open!==true||calls[1].body.open!==false)process.exit(1);
+window.location.protocol='file:';notifyMediaWorkspace('video-edit-modal',true);if(calls.length!==3)process.exit(2);
+window.location.protocol='https:';window.parent=window;notifyMediaWorkspace('image-edit-modal',true);if(calls.length!==3)process.exit(3);
 """)
 
     def test_canvas_fits_actual_work_area_instead_of_small_modal_limit(self):
@@ -104,7 +104,12 @@ allow=true;if(closeModal('image-edit-modal')!==true||!modal.hidden||notification
             rendered=render_knowledge_ui(device,Path('/tmp/synthetic-shared'))
             ids=Page(rendered).ids
             for target in re.findall(r"\$\('([^']+)'\)", rendered):self.assertIn(target,ids)
-            if device=='mac':self.assertIn('MEDIA_EDITING_SUPPORTED=false',rendered)
+            if device=='mac':
+                self.assertIn('SCREEN_CAPTURE_SUPPORTED=false',rendered)
+                self.assertIn("if(['video','audio'].includes(metadata.mediaType))controls.appendChild(edit)",rendered)
+                hidden=re.search(r'<style id="desktop-capability-style">(.*?)</style>',rendered,re.S).group(1)
+                self.assertIn('#image-edit-modal',hidden)
+                self.assertNotIn('#video-edit-modal',hidden)
             scripts=re.findall(r'<script>([\s\S]*?)</script>',rendered)
             for script in scripts:
                 if shutil.which('node'):

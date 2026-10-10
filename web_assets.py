@@ -14,7 +14,7 @@ HERE = Path(__file__).resolve().parent
 
 def asset_path(name: str) -> Path:
     """Prefer bundled release assets, with the Android checkout as dev fallback."""
-    if name not in ("knowledge.html", "notes.html", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):
+    if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):
         raise ValueError("Unknown DevHelper asset")
     packaged = HERE / "static" / name
     if packaged.is_file():
@@ -81,40 +81,40 @@ def _mac_ui(source: str, shared_dir: Path) -> str:
     source = _replace_required(
         source,
         "const API=",
-        "const MEDIA_EDITING_SUPPORTED=false;\nconst DEFAULT_DIRECTORY=" + _js_string(directory) + ";\nconst API=",
+        "const SCREEN_CAPTURE_SUPPORTED=false;\nconst DEFAULT_DIRECTORY=" + _js_string(directory) + ";\nconst API=",
     )
     source = _replace_required(
         source,
         "function renderCaptureControls(){",
         "function renderCaptureControls(){\n"
-        " if(!MEDIA_EDITING_SUPPORTED){['capture-screen-insert','capture-record-start','capture-record-stop','capture-record-refresh','capture-record-dismiss'].forEach(id=>$(id).disabled=true);return;}",
+        " if(!SCREEN_CAPTURE_SUPPORTED){['capture-screen-insert','capture-record-start','capture-record-stop','capture-record-refresh','capture-record-dismiss'].forEach(id=>$(id).disabled=true);return;}",
     )
     source = _replace_required(
         source,
         "async function requireCaptureService(){",
         "async function requireCaptureService(){\n"
-        " if(!MEDIA_EDITING_SUPPORTED)throw new Error('屏幕捕获请切换到已连接的 Android 设备。');",
+        " if(!SCREEN_CAPTURE_SUPPORTED)throw new Error('屏幕捕获请切换到已连接的 Android 设备。');",
     )
     source = _replace_required(
         source,
         "function scheduleCapturePoll(){",
-        "function scheduleCapturePoll(){\n if(!MEDIA_EDITING_SUPPORTED)return;",
+        "function scheduleCapturePoll(){\n if(!SCREEN_CAPTURE_SUPPORTED)return;",
     )
     source = _replace_required(
         source,
         "async function openMediaEditor(raw){",
         "async function openMediaEditor(raw){\n"
-        " if(!MEDIA_EDITING_SUPPORTED){toast('当前电脑未启用媒体编辑，请下载后编辑，或切换到 Android 设备。',true);return;}",
+        " if(raw&&raw.mediaType==='image'){toast('图片编辑请切换到 Android 设备。',true);return;}",
     )
     source = _replace_required(
         source,
         "button.type='button';button.addEventListener('click',()=>busy(button,work));return button;",
-        "button.type='button';if(!MEDIA_EDITING_SUPPORTED&&['编辑图片','剪辑视频'].includes(label)){button.hidden=true;button.disabled=true;}button.addEventListener('click',()=>busy(button,work));return button;",
+        "button.type='button';if(label==='编辑图片'){button.hidden=true;button.disabled=true;}button.addEventListener('click',()=>busy(button,work));return button;",
     )
     source = _replace_required(
         source,
         "controls.appendChild(edit);info.appendChild(controls);",
-        "if(MEDIA_EDITING_SUPPORTED)controls.appendChild(edit);info.appendChild(controls);",
+        "if(['video','audio'].includes(metadata.mediaType))controls.appendChild(edit);info.appendChild(controls);",
     )
     # Retain every ID and control for the original event bindings. The CSS also
     # prevents later status updates from exposing unsupported capture/edit UI.
@@ -124,7 +124,7 @@ def _mac_ui(source: str, shared_dir: Path) -> str:
         "<style id=\"desktop-capability-style\">"
         '.attachment-actions[aria-label="电脑屏幕捕获"],'
         "#capture-progress,#capture-progress+p,#capture-photo,#choose-desktop-files,"
-        "#image-edit-modal,#video-edit-modal,#video-export-banner"
+        "#image-edit-modal"
         "{display:none!important}</style>\n</head>",
     )
     return source
@@ -134,7 +134,8 @@ def render_knowledge_ui(device: Device, shared_dir: Path) -> str:
     """Read the Android editor and scope all API/media URLs to one device.
 
     mac keeps memory, vectors, schedules, attachments and shared-folder browsing;
-    capture and media editing remain Android capabilities. Neither device gets
+    video playback and editing run locally; screen capture remains Android-only.
+    Neither device gets
     access to the other iframe's API routes.
     """
     if device not in ("mac", "android"):

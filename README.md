@@ -2,6 +2,12 @@
 
 使用 Python 在 Mac 上运行同一套设备入口、笔记、记忆、Skills、向量、日程和资源管理。手机可以通过浏览器访问电脑，电脑也可以通过局域网调用已连接手机的 DevHelper。两端分别保存资料，选择设备决定这次查看哪一端；可开启资料同步，换电脑时从手机恢复。公开源码与私有资料分开保存。
 
+## 2.6.1 交互与 AAC 波形修复
+
+工作台、资料管理和笔记／录音／AI 页面共用轻量动效：页签按切换方向轻滑淡入，普通弹窗从触发位置展开，按钮提供按压与焦点反馈，状态、列表和展开项有短暂提示。关闭弹窗立即释放交互，退出视觉可随重新打开中断；全屏图片、视频和音频编辑保持原尺寸，播放头、ROI 和波形拖动不叠加位移动画。进度轮询不会反复闪动，系统／浏览器开启减少动态效果后取消进行中的动效。
+
+AAC 解码器可能输出容器时长以外的尾部补齐样本。2.6.1 只把所选区间内样本计入波形，多余样本排空后忽略，避免报错或污染最后一桶。`decodedFrames` 表示有效区间样本帧数，`decodedPcmFrames` 表示实际解码帧数，`discardedPaddingFrames` 表示忽略的尾部帧数；跨声道绝对幅值与不归一化的规则保留。单次解码仍受区间工作量加 64 KiB 容差、最多 8 GiB 和处理超时保护，与录音存储配额无关。
+
 ## 一次接入其他工程
 
 这台电脑已经运行 DevHelper 时，在其他工程使用同一个 HTTP MCP，不需要在每个工程部署一次服务。Python 3.11+ 执行：
@@ -20,6 +26,47 @@ python3 /你的DevHelper安装目录/scripts/import_project.py --project "/你�
 
 配置格式遵循 [Codex MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[Codex Skills 文档](https://learn.chatgpt.com/docs/build-skills) 和 [Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)。
 
+## 通过手机生成视频帧拼图（手机 2.5.0）
+
+手机打开「素材库 → 视频更多菜单 → 生成帧拼图」，也可在视频编辑页切换「帧拼图」模式。复用视频的画框 ROI 和时间选择，把真实连续帧或按间隔选出的帧合成带时间标签的新图片。手机上的 FFmpeg 解码、裁剪和缩放，libjpeg-turbo/libpng 编码图片，不调用任何模型。生成的图片可按已有附件同步方式传给电脑、插入笔记或交给视觉 AI。
+
+电脑版 HTTP MCP 先调用 `devhelper_list_tools {"device":"android"}` 获取手机最新工具，再用 `devhelper_call_tool` 指定 `device=android`、`name=knowledge_start_video_storyboard`，将拼图参数放在 `arguments` 中。参数包括附件 `id`、`startSeconds`、`endSeconds`、`crop={x,y,width,height}`（旋转校正后的原视频像素）、`samplingMode=interval|consecutive`、`frameCount`、`intervalSeconds`、`columns` 与 `cellWidth`。默认从 0 秒开始、截止视频末尾，按 1 秒间隔最多取 12 帧，每行 4 格、单格宽 320 像素；默认 JPEG 质量 85，显示时间标签。间隔模式取每个非空时间段的第一张真实帧，连续模式取相邻解码帧；结束时间不包含在内，不足或空缺帧不会复制填充。录屏 `artifactId` 需先用 `knowledge_import_media_artifact` 转成手机附件 id，原视频保留。
+
+通过同一电脑网关轮询 `knowledge_video_storyboard_status`，参数为 `{"jobId":"返回的任务 id"}`，确认 `state=completed` 后再传 `includeImage:true`。电脑网关会保留标准 MCP 图片内容，供支持图片的客户端读取；图片预览最长边最多 2048 像素、JPEG 最多 384 KiB，`imageRendering` 标明实际预览尺寸和缩放关系。完整图片仍在 `attachment.contentPath` 里，通过当前设备路由下载；`frames` 提供真实时间和每格图片坐标。状态默认只含元数据，不重复嵌入图片字节。`knowledge_cancel_video_storyboard` 可取消未完成的拼图任务。直接连接手机 MCP 时使用同名工具。手机需更新到 2.5.0；电脑网关动态读取工具目录，无需固定写入手机 IP。
+
+HTTP 对应 `POST /api/knowledge/media/video-storyboard/start`、`status`、`cancel`；通过电脑版访问手机时使用 `/device-api/android` 路由前缀。HTTP 状态只接受 `jobId` 并返回元数据，图片从附件地址流式下载；`includeImage` 是 MCP 状态工具的可选参数。任务状态保存在当前手机应用进程，重启后生成的图片仍在素材库中。
+
+## 双端视频播放与精调（2.5.1）
+
+在手机素材库的视频菜单选择「剪辑视频」或「生成帧拼图」；文档里的视频附件也可进入同一编辑页。电脑版先选「这台 Mac」或已连接手机，再从素材库打开视频编辑。全屏编辑页提供真实播放与暂停、独立播放头和片段回放：播放头用于定位画面，起点、终点用于选择导出范围，拖动播放头不会改动裁剪区间。「播放片段」从起点播放，到终点暂停。
+
+时间轴可放大、缩小、显示全片和左右移动可见窗口；缩放只改变时间轴的视野，不改变已选区间。起止时间支持秒数或 `HH:MM:SS.mmm`，也能选中「起点／终点」后以 100ms 或 1s 步长点击加减，或取当前播放头位置。输入时间后先应用，再导出。手机拖动时间或按加减时有轻触反馈，遵循系统触感设置，自动播放不振动。100ms 是调整步长；播放器 seek、源帧和编码器会影响实际画面与切点，不承诺逐帧或任意毫秒精度。
+
+这台 Mac 可以本地导出视频的时间剪辑、画面裁剪和画笔、直线、箭头、框选、文字标注。使用安装依赖提供的 FFmpeg 和 Pillow，画面编辑输出 H.264 MP4，保留音轨并编码为 AAC；原附件保留。ROI 和标注使用旋转校正后的原视频像素，导出宽高向下调整为偶数，返回 `requestedCrop` 与 `actualCrop`。不运行语言模型，也不把视频自动上传云端。电脑本机图片编辑仍未接入；手机图片编辑能力按手机工具目录提供。
+
+本地 MCP 工具为 `knowledge_start_video_attachment_edit`、`knowledge_video_attachment_edit_status`、`knowledge_cancel_video_attachment_edit`。先读取附件媒体信息，开始参数为 `{id,startSeconds,endSeconds,crop?,operations?,bitrate?,frameRate?}`；`id` 必须是所选设备已拥有的视频附件。`startSeconds`、`endSeconds` 必填，区间至少 0.1 秒；默认码率 4000000、输出帧率 30。启动返回 `jobId`，状态与取消只传 `{jobId}`，轮询到 `state=completed` 后读取新 `attachment` 和 `actualDurationSeconds`。导出时源附件受删除保护，失败或取消清理未发布副本，已经提交的新副本保留。任务历史最多记录当前进程的 32 个任务，服务重启后不能续跑，但已生成附件保留。
+
+HTTP 对应 `POST /api/knowledge/media/video-edit/start`、`status`、`cancel`。电脑版处理本机附件可直接访问上述地址，访问手机加 `/device-api/android` 前缀；`/device-api/mac` 明确选择本机。MCP 也可通过 `devhelper_call_tool` 选择 `device=mac` 或 `android`，使用所选设备实际提供的同名工具。`knowledge_trim_video_attachment` 和 `POST /api/knowledge/media/trim-video` 只做 MP4/MOV 时间快速剪辑，参数为 `{id,startSeconds,endSeconds}`，流复制保留音轨并直接返回新附件；切点受关键帧影响，`precise=false`，需要核对实际时长。
+
+## 双端音频播放、波形与剪辑（2.6.0）
+
+手机从素材库或录音列表打开音频剪辑；电脑版先选择「这台 Mac」或已连接手机，再在素材库或录音列表打开「剪辑音频」。全屏页面先显示整段录音的真实波形，支持播放、暂停、独立播放头、试听选区、拖动边界以及缩放和平移。放大后的波形由所选设备重新解码该时间窗口，不把整段的粗略包络直接放大充当细节。起止时间支持秒数或 `HH:MM:SS.mmm`，播放头和区间边界可按 100ms／1s 加减；手机轻触反馈遵循系统设置。播放头定位不改变导出区间。
+
+波形来自流式 PCM 解码：每个时间桶取所有声道样本的最大绝对振幅，数值为 0 到 1，不做音量归一化，也不将立体声混为单声道，避免反相信号相消。默认计算整段、1024 个桶，可请求 64 到 4096 个桶，空桶为 0。它显示振幅随时间的变化，与播放时显示频率分布的 FFT 频谱不同。手机用 OpenGL ES 2 Shader 绘制，播放频谱通过绑定当前播放器会话的 Android Visualizer 取得；系统要求 `RECORD_AUDIO` 权限，界面提供「授权播放频谱」，不会打开麦克风。未授权或设备不支持频谱时，仍可播放、查看波形和剪辑。电脑版浏览器使用 Web Audio 的实际 FFT 与 WebGL Shader；无 WebGL 时改用兼容画布，无 Web Audio 时保留波形和编辑，不显示虚构频谱。
+
+先用 `knowledge_get_attachment_media_info {id}` 查看音频时长、`sampleRate`、`channels`、`waveformSupported` 与 `audioEditingSupported`。附件必须已存在于此次选择的设备；传输或相同 UUID 不能代替实际文件检查。四个音频 MCP 工具如下，直接连接设备时使用同名工具；经过电脑入口时先调用 `devhelper_list_tools {"device":"mac"}` 或 `{"device":"android"}` 获取实际 schema，再用 `devhelper_call_tool {device,name,arguments}` 指定设备。
+
+| 工具 | 参数与结果 |
+| --- | --- |
+| `knowledge_get_audio_waveform` | `{id,buckets?,startSeconds?,endSeconds?}`；默认起点 0、终点为整段时长、1024 桶。返回 `peaks`、实际范围、采样率、声道数与 `decodedFrames`；`waveformType=absolute_peak_envelope`、`normalized=false`。缩放时传入窗口范围重新取样。 |
+| `knowledge_start_audio_attachment_edit` | `{id,startSeconds,endSeconds,name?}`；起止时间必填、区间至少 0.1 秒，返回异步 `jobId`。 |
+| `knowledge_audio_attachment_edit_status` | `{jobId}`；轮询进度，只有 `state=completed` 才读取新 `attachment` 与 `actualDurationSeconds`。 |
+| `knowledge_cancel_audio_attachment_edit` | `{jobId}`；请求取消后继续查询最终状态，已经完成的新副本保留。 |
+
+剪辑由所选设备的 FFmpeg 将指定区间重新编码为 AAC/M4A 新附件，保留源采样率和声道数，原录音保留，笔记引用不会自动改写。仅支持单音轨；非 AAC 支持的采样率会明确拒绝，不悄悄降采样。切点按解码样本处理，AAC 和容器边界仍可能影响实际播放时长，100ms 输入步长不代表任意毫秒精度。保存剪辑不会启动转录、摘要、模型或上传。
+
+HTTP 对应 `POST /api/knowledge/media/audio-waveform`、`/api/knowledge/media/audio-edit/start`、`status`、`cancel`，请求正文与上述工具相同；媒体信息使用 `POST /api/knowledge/media/info {id}`。电脑访问手机时加 `/device-api/android` 前缀，明确本机可用 `/device-api/mac`。音频任务历史最多保留当前进程的 32 条，重启不恢复任务；已保存的附件继续保留。每台设备同时处理一个音频导出和一个波形请求。处理时保护源附件，取消清理未发布副本。源文件最长 24 小时、1–8 声道；波形单次请求限制解码工作量和处理时间，过长时可分窗口读取，附件库仍不设存储配额。
+
 ## 手机任务完成提醒（2.4.0）
 
 手机原生管理的“设备 → 任务提醒”提供总开关、声音、震动和下一步提示，默认关闭。页面显示通知权限、系统勿扰和通知频道状态，并有明确的测试按钮。系统勿扰开启时整个提醒都会跳过；不会使用 Root 绕过通知权限或系统静音。锁屏只展示通用完成提示，打开通知可查看任务与下一步。系统自身的声音、震动和频道设置仍然生效；“已发送”只表示 Android 接受了通知，不能证明用户已经听到声音。
@@ -34,7 +81,7 @@ HTTP 对应 `GET/POST /api/workflows/notifications/config`、`GET /api/workflows
 
 电脑版采用固定侧栏和设备切换栏，资料、笔记与录音按列表管理。编辑资料在独立面板中完成，媒体编辑占据整个浏览器窗口，关闭后恢复原工作台。手机原生管理分为“笔记、素材、任务、设备”四区；新增、编辑资料和任务使用完整页面，删除等简短确认才使用弹窗。
 
-选择已连接手机，在素材库打开图片或视频后点击“编辑”。手机原生图片和视频编辑使用全屏画布：直接拖出裁剪框、拖动角点调整，底部切换画笔、直线和框选，支持撤销和重置；视频同时使用底部双端时间滑块选取片段。点击“另存”保存新素材，原文件保留。截图、录像和导入媒体使用同一入口。电脑版查看手机素材时，同样提供全屏画框编辑和视频时间剪辑；电脑版本机的媒体编辑能力见下方限制。
+选择已连接手机，在素材库打开图片或视频后点击“编辑”。手机原生图片和视频编辑使用全屏画布：直接拖出裁剪框、拖动角点调整，底部切换画笔、直线和框选，支持撤销和重置；视频同时使用底部双端时间滑块选取片段。点击“另存”保存新素材，原文件保留。截图、录像和导入媒体使用同一入口。电脑版查看手机素材时，同样提供全屏画框编辑和视频时间剪辑；2.5.1 也支持电脑本机的视频导出，具体接口见上文。
 
 手机 2.2.1 的悬浮采集菜单使用小图标；录屏时仅保留小号计时和闪烁的红色停止图标，可拖到上下左右边缘。应用和悬浮菜单开始录屏前有总计 1.5 秒的 `3 → 2 → 1` 倒计时，期间可取消；结束后按真实结果提示保存或失败。手机系统仍可能限制悬浮窗在受保护界面的显示。
 
@@ -118,7 +165,7 @@ python3 scripts/deploy_relay.py --ssh-host 用户@服务器地址 \
 - 默认浏览和共享范围是本目录的 `shared` 文件夹。可以把需要使用的文件放进去，或通过 `--shared-dir` 指定其他文件夹。目录浏览为只读，不提供删除原始电脑文件的功能；指向共享范围外的符号链接不会暴露外部文件。
 - 本服务不在本地运行语言模型或向量模型。向量由连接客户端生成后导入，电脑本地保存并计算余弦相似度。正文修改或删除会使对应旧向量失效；语音识别可以另行配置可选的本地 Whisper 后端。
 - 日程在桌面助手运行期间执行指定 MCP 工具。单次或重复任务均先持久化领取状态再执行；错过的重复次数跳过，已领取但中断的任务不会自动重放。
-- Mac 端媒体裁剪、标注和录屏编辑尚未接入，界面隐藏或禁用这些能力；选择已连接手机可使用手机已有媒体工具。
+- Mac 端视频已支持本机裁剪、标注和时间剪辑，录屏复制或导入为视频附件后使用同一入口；音频支持真实波形和 AAC/M4A 时间剪辑新副本。电脑图片编辑尚未接入；选择已连接手机可使用手机已有图片工具。
 
 ## 笔记、录音与后台任务
 
@@ -214,4 +261,4 @@ python3 scripts/publish.py --push
 
 远程 `origin` 必须与显式配置的地址一致，当前分支必须与配置分支一致。只提交 `publish-files.json` 中列出的代码、界面、测试和许可证；运行资料、日志、私人路径、其他未列明文件会阻止发布。推送前也检查可达提交历史，避免已删除的私人文件随历史上传。脚本不登录 GitHub、不创建仓库、不强制推送，也不建立后台自动推送。同步手机资料不会触发 GitHub 发布。
 
-验证代码可以运行 `./.venv/bin/python -m unittest discover -s tests -v`。这些测试使用临时资料和合成文本，不读取系统剪贴板或真实手机资料。
+验证代码可以运行 `./.venv/bin/python -m unittest discover -s tests -v`。这些测试使用临时资料、合成文本、音频和视频，不读取系统剪贴板或真实手机资料，也不安装、卸载或清空手机应用。手机仪器测试应使用 Android 项目的独立 `verification` 应用与专用测试设备；不要对正常 DevHelper 包运行 connected 仪器测试，测试安装器可能卸载被测应用并删除其私有资料。普通手机联调通过已有 HTTP/MCP 连接，只创建和清理本次专用测试文件。

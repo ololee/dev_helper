@@ -136,6 +136,35 @@ class ServerTests(unittest.TestCase):
             value = self.client.portal.call(relay_call)['body']['result']
             self.assertEqual(value['structuredContent'], draft)
 
+    def test_phone_storyboard_image_survives_dynamic_http_mcp_gateway(self):
+        image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+        metadata = {'state': 'completed', 'attachment': {'id': 'owned-picture', 'kind': 'image'},
+                    'frames': [{'index': 0, 'timestampSeconds': 0.4}]}
+        reply = {'content': [{'type': 'text', 'text': json.dumps(metadata)},
+                             {'type': 'image', 'data': image, 'mimeType': 'image/png'}],
+                 'structuredContent': metadata, 'isError': False}
+        schema = {'name': 'knowledge_video_storyboard_status', 'description': 'Read the selected storyboard',
+                  'inputSchema': {'type': 'object', 'properties': {'jobId': {'type': 'string'},
+                                  'includeImage': {'type': 'boolean'}}, 'required': ['jobId'],
+                                  'additionalProperties': False}}
+
+        async def phone(method, params):
+            if method == 'tools/list':
+                return {'tools': [schema]}
+            self.assertEqual(params, {'name': schema['name'], 'arguments': {'jobId': 'owned-job', 'includeImage': True}})
+            return reply
+
+        with patch.object(self.desktop, 'phone_rpc', AsyncMock(side_effect=phone)) as route:
+            catalog = self.rpc('tools/call', {'name': 'devhelper_list_tools', 'arguments': {'device': 'android'}})['result']
+            self.assertEqual(catalog['structuredContent']['tools'][0]['name'], schema['name'])
+            result = self.rpc('tools/call', {'name': 'devhelper_call_tool', 'arguments': {
+                'device': 'android', 'name': schema['name'], 'arguments': {'jobId': 'owned-job', 'includeImage': True}}})['result']
+            self.assertFalse(result['isError'])
+            self.assertEqual(result['structuredContent'], metadata)
+            self.assertEqual(result['content'][1], reply['content'][1])
+            self.assertNotIn(image, json.dumps(result['structuredContent']))
+            self.assertEqual(route.await_count, 3)
+
 
 if __name__ == '__main__':
     unittest.main()

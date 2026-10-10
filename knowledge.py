@@ -233,10 +233,21 @@ class KnowledgeService:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.scheduler_error: str | None = None
+        self._media_pins: dict[str, int] = {}
+        if __package__:
+            from .media import DesktopVideoEditor
+            from .audio import DesktopAudioEditor
+        else:
+            from media import DesktopVideoEditor
+            from audio import DesktopAudioEditor
+        self.video_editor = DesktopVideoEditor(self)
+        self.audio_editor = DesktopAudioEditor(self)
         self._recover_schedules()
 
     def close(self) -> None:
         self.stop_scheduler()
+        self.video_editor.close()
+        self.audio_editor.close()
         # A callback may still be finishing. Keep the connection available until
         # that worker has committed its result; process exit handles final close.
         if self._thread and self._thread.is_alive():
@@ -845,6 +856,8 @@ class KnowledgeService:
     def delete_attachment(self, identifier: str) -> dict:
         with self.lock:
             self._attachment(identifier)
+            if self._media_pins.get(identifier, 0):
+                raise KnowledgeError("资源正在读取或导出，请等待完成或先取消任务。", 409)
             if self._references(identifier):
                 raise KnowledgeError("请先从记忆或 Skill 正文移除引用，再删除资源。", 409)
             with self.db:
@@ -875,10 +888,14 @@ class KnowledgeService:
                 if source == "artifact" or (kind != "all" and kind != item["kind"]) or needle not in item["name"].casefold():
                     continue
                 refs = self._references(item["id"])
+                pinned = bool(self._media_pins.get(item["id"], 0))
                 item.update(source="attachment", downloadPath=item["contentPath"], referenceDocuments=refs[:8],
-                            referenceDocumentsTruncated=len(refs) > 8, canDelete=not refs)
+                            referenceDocumentsTruncated=len(refs) > 8, canDelete=not refs and not pinned,
+                            busy=pinned)
                 if refs:
                     item["deleteBlockedReason"] = "请先从记忆或 Skill 正文移除引用，再删除资源。"
+                elif pinned:
+                    item["deleteBlockedReason"] = "资源正在读取或导出，请等待完成或先取消任务。"
                 items.append(item)
             items.sort(key=lambda a: (a["createdAt"], a["id"]), reverse=True)
             return _page(items, "items", fields.get("offset", 0), fields.get("limit", 24),
@@ -939,6 +956,10 @@ class KnowledgeService:
         with self.lock:
             data, path = self._attachment(identifier)
             result = {"id": identifier, "kind": data["kind"], "mimeType": data["mimeType"], "bytes": data["bytes"]}
+        if data["kind"] == "video":
+            return {**result, **self.video_editor.info(identifier)}
+        if data["kind"] == "audio":
+            return {**result, **self.audio_editor.info(identifier)}
         ffprobe = shutil.which("ffprobe")
         if ffprobe:
             command = [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
@@ -968,7 +989,10 @@ class KnowledgeService:
                 "serverTimeMillis": _now(), "timezone": str(datetime.now().astimezone().tzinfo),
                 "modelsRunOnPhone": False, "modelsRunLocally": False, "scheduler": self.scheduler_status(),
                 "storagePath": str(self.root), "fileRoots": [str(v) for v in self.file_roots],
-                "mediaEditingSupported": False}
+                "mediaEditingSupported": True, "imageEditingSupported": False,
+                "videoEditingSupported": True, "videoEditJob": self.video_editor.latest(),
+                "audioEditingSupported": True, "audioWaveformSupported": True,
+                "audioEditJob": self.audio_editor.latest()}
 
     def handle(self, method: str, path: str, query: dict | None = None, data: dict | None = None,
                body: bytes | BinaryIO | None = None, headers: dict | None = None) -> Response | None:
@@ -1079,6 +1103,22 @@ class KnowledgeService:
             elif route == "media/info" and method == "POST":
                 _known(data, "id")
                 return Response(data=self.media_info(data.get("id")))
+            elif route == "media/video-edit/start" and method == "POST":
+                return Response(data=self.video_editor.start(data))
+            elif route == "media/video-edit/status" and method == "POST":
+                return Response(data=self.video_editor.status(data))
+            elif route == "media/video-edit/cancel" and method == "POST":
+                return Response(data=self.video_editor.cancel(data))
+            elif route == "media/trim-video" and method == "POST":
+                return Response(data=self.video_editor.trim(data))
+            elif route == "media/audio-waveform" and method == "POST":
+                return Response(data=self.audio_editor.waveform(data))
+            elif route == "media/audio-edit/start" and method == "POST":
+                return Response(data=self.audio_editor.start(data))
+            elif route == "media/audio-edit/status" and method == "POST":
+                return Response(data=self.audio_editor.status(data))
+            elif route == "media/audio-edit/cancel" and method == "POST":
+                return Response(data=self.audio_editor.cancel(data))
             elif route.startswith("media/"):
                 return Response(status=501, data={"error": "桌面媒体编辑尚未接入，请选择手机设备使用已有编辑功能。"})
             elif route in ("status", "tools") or route.startswith(("assets/", "capture/", "desktop/")):
@@ -1111,6 +1151,20 @@ class KnowledgeService:
         schedule = {"id": identifier, "title": text, "toolName": text, "arguments": {"type": "object"},
                     "runAt": text, "intervalMinutes": {"type": "integer", "minimum": 0, "maximum": 43200},
                     "enabled": {"type": "boolean"}, "expectedRevision": integer}
+        video_time = {"id": identifier, "startSeconds": {"type": "number", "minimum": 0, "maximum": 21600},
+                      "endSeconds": {"type": "number", "minimum": 0, "maximum": 21600}}
+        audio_time = {"id": identifier, "startSeconds": {"type": "number", "minimum": 0, "maximum": 86400},
+                      "endSeconds": {"type": "number", "minimum": 0, "maximum": 86400}}
+        point = {"type": "object", "properties": {"x": {"type": "number", "minimum": 0}, "y": {"type": "number", "minimum": 0}},
+                 "required": ["x", "y"], "additionalProperties": False}
+        crop = {"type": "object", "properties": {"x": integer, "y": integer,
+                "width": {"type": "integer", "minimum": 1, "maximum": 8192}, "height": {"type": "integer", "minimum": 1, "maximum": 8192}},
+                "required": ["x", "y", "width", "height"], "additionalProperties": False}
+        operations = {"type": "array", "maxItems": 128, "items": {"type": "object", "properties": {
+            "type": {"enum": ["pen", "line", "arrow", "rect", "text"]}, "points": {"type": "array", "minItems": 1, "maxItems": 1024, "items": point},
+            "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}, "width": {"type": "integer", "minimum": 1, "maximum": 32},
+            "text": {"type": "string", "maxLength": 256}, "fontSize": {"type": "integer", "minimum": 12, "maximum": 128}},
+            "required": ["type", "points", "color", "width"], "additionalProperties": False}}
         result = [
             self._spec("knowledge_list_documents", "List or search local desktop Markdown memories, notes and skills.", {"kind": doc["kind"], "query": text, **pagination}),
             self._spec("knowledge_read_document", "Read Markdown including its revision; use expectedRevision when saving.", {"id": identifier}, ("id",)),
@@ -1135,6 +1189,20 @@ class KnowledgeService:
             self._spec("knowledge_browse_device_files", "Browse configured desktop shared directories. Files are read-only; symlinks cannot escape shared roots.", {"path": text, "query": text, **pagination}),
             self._spec("knowledge_import_device_attachment", "Import an image/video from a configured desktop shared directory; preserve the source.", {"path": text}, ("path",), False),
             self._spec("knowledge_get_attachment_media_info", "Read image/video dimensions and duration. FFmpeg is required for some formats.", {"id": identifier}, ("id",)),
+            self._spec("knowledge_start_video_attachment_edit", "Start an asynchronous local FFmpeg video crop, fixed annotations and time-range export to a new MP4 attachment. Coordinates are upright source pixels after display rotation. Annotations precede crop; odd crop dimensions round down to even pixels. Re-encodes H.264 and retains all audio tracks via AAC. The original is pinned and retained. Poll status for progress and completed attachment; no Markdown change.",
+                       {**video_time, "crop": crop, "operations": operations,
+                        "bitrate": {"type": "integer", "minimum": 100000, "maximum": 20000000, "default": 4000000},
+                        "frameRate": {"type": "integer", "minimum": 1, "maximum": 60, "default": 30}},
+                       ("id", "startSeconds", "endSeconds"), False),
+            self._spec("knowledge_video_attachment_edit_status", "Read a process-local video export job's progress and completed immutable attachment. Download paths remain available until explicitly deleted.", {"jobId": identifier}, ("jobId",)),
+            self._spec("knowledge_cancel_video_attachment_edit", "Cancel one returned queued/running video export. Poll until cancelled; the source is retained and an already completed copy is kept.", {"jobId": identifier}, ("jobId",), False),
+            self._spec("knowledge_trim_video_attachment", "Copy an MP4/MOV time range to a new local MP4 without re-encoding. Source retained and all audio tracks preserved. Actual start/end depend on source keyframes and may differ from requested times; use asynchronous video edit for crop, annotations or closer source-frame cuts.", video_time, ("id", "startSeconds", "endSeconds"), False),
+            self._spec("knowledge_get_audio_waveform", "Decode a local audio attachment to a bounded streaming PCM absolute-peak envelope. This is amplitude over time, not FFT; no volume normalization. All source channels contribute their maximum absolute amplitude, preventing phase cancellation. Defaults to full recording and 1024 buckets. Original retained; no upload or Markdown change.",
+                       {**audio_time, "buckets": {"type": "integer", "minimum": 64, "maximum": 4096, "default": 1024}}, ("id",)),
+            self._spec("knowledge_start_audio_attachment_edit", "Start asynchronous audio time-range export to a new AAC/M4A attachment. Keep source sample rate and channel count; source pinned and retained. Cuts follow source samples, and AAC/container boundaries can affect actual playback duration. Minimum interval 0.1 seconds. Poll status for progress and completed attachment. No transcription, upload or Markdown change.",
+                       {**audio_time, "name": {"type": "string", "minLength": 1, "maxLength": 160}}, ("id", "startSeconds", "endSeconds"), False),
+            self._spec("knowledge_audio_attachment_edit_status", "Read process-local audio export progress and completed attachment metadata. Output remains stored until explicitly deleted.", {"jobId": identifier}, ("jobId",)),
+            self._spec("knowledge_cancel_audio_attachment_edit", "Cancel a queued or running audio export. Poll until cancelled; partial task files are removed. Original and any already completed output remain stored.", {"jobId": identifier}, ("jobId",), False),
         ]
         return result
 
@@ -1164,6 +1232,14 @@ class KnowledgeService:
             "knowledge_browse_device_files": lambda: self.browse_files(args),
             "knowledge_import_device_attachment": lambda: self.import_file(args.get("path")),
             "knowledge_get_attachment_media_info": lambda: self.media_info(args.get("id")),
+            "knowledge_start_video_attachment_edit": lambda: self.video_editor.start(args),
+            "knowledge_video_attachment_edit_status": lambda: self.video_editor.status(args),
+            "knowledge_cancel_video_attachment_edit": lambda: self.video_editor.cancel(args),
+            "knowledge_trim_video_attachment": lambda: self.video_editor.trim(args),
+            "knowledge_get_audio_waveform": lambda: self.audio_editor.waveform(args),
+            "knowledge_start_audio_attachment_edit": lambda: self.audio_editor.start(args),
+            "knowledge_audio_attachment_edit_status": lambda: self.audio_editor.status(args),
+            "knowledge_cancel_audio_attachment_edit": lambda: self.audio_editor.cancel(args),
         }
         try:
             spec = next((s for s in self.tool_specs() if s["name"] == name), None)

@@ -1,6 +1,6 @@
 [project]
 name = "devhelper-desktop"
-version = "2.4.0"
+version = "2.6.1"
 description = "DevHelper desktop and Android workspace over HTTP MCP"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "jsonschema>=4.23,<5",
   "imageio-ffmpeg>=0.6,<1",
+  "Pillow>=10,<13",
   "zeroconf>=0.145,<1",
   "PyYAML>=6,<7",
   "pyobjc-framework-Cocoa>=11,<20; sys_platform == 'darwin'",
@@ -21,7 +22,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["relay"]
-py-modules = ["server", "control", "clipboard", "devices", "knowledge", "sync", "private_skills", "web_assets", "workflows", "ai_support", "notifications", "relay_client"]
+py-modules = ["server", "control", "clipboard", "devices", "knowledge", "media", "audio", "sync", "private_skills", "web_assets", "workflows", "ai_support", "notifications", "relay_client"]
 
 [project.scripts]
 devhelper-relay = "relay.server:main"

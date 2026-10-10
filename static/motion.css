@@ -1,0 +1,12 @@
+/* Shared, finite interaction motion. Media coordinates and layout stay stable. */
+:root{--motion-fast:120ms;--motion-standard:180ms;--motion-ease:cubic-bezier(.2,.7,.2,1)}
+button,[role=button],a.task-button,summary{transition:transform var(--motion-fast) var(--motion-ease),background-color var(--motion-standard) var(--motion-ease),border-color var(--motion-standard) var(--motion-ease),box-shadow var(--motion-standard) var(--motion-ease);transform-origin:center}
+button:not(:disabled):active,[role=button]:not([aria-disabled=true]):active,a.task-button:active{transform:scale(.985)}
+button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #7d99f3;outline-offset:3px}
+input:not([type=range]),textarea,select{transition:border-color var(--motion-standard) var(--motion-ease),box-shadow var(--motion-standard) var(--motion-ease)}
+details>summary{cursor:pointer}details>summary::marker{color:var(--muted,#637087)}
+.motion-exit-proxy,.motion-exit-proxy *{pointer-events:none!important;user-select:none!important}
+.motion-exit-proxy{position:fixed!important;margin:0!important;z-index:2147483000!important;overflow:hidden;contain:layout paint}
+/* Recording is communicated by color and a clock; no decorative looping pulse. */
+.record-circle.active{animation:none!important}
+@media(prefers-reduced-motion:reduce){html:focus-within{scroll-behavior:auto}*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}button:not(:disabled):active,[role=button]:active,a.task-button:active{transform:none!important}.motion-exit-proxy{display:none!important}}

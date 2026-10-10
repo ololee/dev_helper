@@ -33,6 +33,14 @@ DevHelper 的公开源码和私有资料分开保存。GitHub 只保存允许发
 
 ## 可选的本地转录与处理设置
 
+2.5.1 的本机视频编辑随电脑版依赖安装 FFmpeg（`imageio-ffmpeg`）和 Pillow，支持时间、ROI 和标注另存副本；不需要手机 Root 或本地语言模型。更新后确认本机媒体信息的 `videoEditingCapabilities` 和实际 start/status/cancel 工具已可用。播放头、时间轴缩放和 100ms／1s 微调是编辑交互，不代表逐帧或任意毫秒的实际切点。电脑本机图片编辑仍未提供，手机能力以连接后的工具目录为准。
+
+2.6.0 的手机与电脑支持音频全屏播放、真实 PCM 峰值波形和时间剪辑，不需要部署语言模型。电脑版复用 FFmpeg；手机使用随应用提供的解码器。更新后按附件归属设备检查 `knowledge_get_attachment_media_info` 的 `waveformSupported`、`audioEditingSupported`、采样率和声道数，再验证四个工具：`knowledge_get_audio_waveform`、`knowledge_start_audio_attachment_edit`、`knowledge_audio_attachment_edit_status`、`knowledge_cancel_audio_attachment_edit`。经电脑入口先用 `devhelper_list_tools` 获取 `device=mac` 或 `android` 的实际 schema，再用 `devhelper_call_tool {device,name,arguments}`。波形参数为 `{id,buckets?,startSeconds?,endSeconds?}`，默认整段 1024 桶、允许 64–4096；各桶取源 PCM 所有声道的最大绝对振幅，未归一化，缩放后重新解码该窗口。导出参数为 `{id,startSeconds,endSeconds,name?}`，起止区间至少 0.1 秒；状态与取消只传 `{jobId}`。只有 completed 才检查新 AAC/M4A 附件及实际时长，保留原采样率、声道数和原附件；只支持单音轨及 AAC 支持的采样率，不承诺任意毫秒切点。任务历史最多 32 条且仅当前进程，重启不恢复未完成导出。
+
+2.6.1 修复 AAC 容器尾部补齐样本：波形只统计请求区间内 PCM，额外尾样本排空后忽略。`decodedFrames` 是有效样本帧数，`decodedPcmFrames` 为实际解码帧数，`discardedPaddingFrames` 为忽略数量；不要把额外解码帧解释成选区变长。单次处理仍有工作量与超时保护，不改变原录音和存储配额。工作台、资料与笔记／录音／AI 浏览器页已接入共用 `motion.js` / `motion.css`；部署要带上打包清单中的这两资源。动效尊重减少动态效果，关闭立即释放交互，媒体画布和播放头不做位置动画；验证交互结果时不把短暂入场过渡当成任务仍未结束。
+
+音频页的独立播放头、试听选区、波形缩放／平移、`HH:MM:SS.mmm` 与 100ms／1s 微调不需要频谱授权。时间波形不是 FFT：Android 的 GLES 播放频谱来自当前播放器会话 Visualizer，必须明确申请系统录音权限，拒绝或不支持时仍能播放、查看波形和剪辑，不打开麦克风。浏览器使用 Web Audio 实际 FFT 和 WebGL，无法使用 WebGL 时采用兼容画布；没有 Web Audio 时保留波形和编辑，不声称频谱可用。验证应使用合成音频和隔离数据目录，不读真实录音，不对正常 Android 应用运行 connected 仪器测试。
+
 录音保存和资料恢复只管理文件，不触发转录、摘要或模型下载。换电脑恢复笔记与音频时不要自动安装转录环境，也不要从旧电脑同步 API 密钥。
 
 用户明确选择 Apple Silicon Mac 本地语音识别后，才在已安装源码目录运行 `.venv/bin/python scripts/setup_asr.py --configure <已验证的电脑版HTTP地址>`。默认下载公开的 `mlx-community/whisper-small-mlx`，建立私有 `.asr-venv` 和 `data/models/` 下按模型仓库区分的独立目录，实际路径以脚本返回的 `settings` 为准；选择其他模型时使用用户指定的 `--model`。这一步会联网安装依赖和下载模型，不能由录音、同步或保存的 Skill 正文触发。运行时只读取已存在的本地模型；setup 完成后检查 `/api/workflows/config` 的 `asrConfigured`。在“录音”页选择用户指定的已保存音频，用“转写文字”创建不提炼的任务，或按明确请求用“转写并提炼”同时整理要点；结果追加到当前已保存笔记，没有当前已保存笔记时新建。查看任务结果，不能仅凭配置成功声称识别已经验证。

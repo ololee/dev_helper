@@ -108,7 +108,7 @@ if(insertAudio([{name:'owned fixture'}],1)!==false)process.exit(1);
 
     def test_audio_buttons_submit_plain_or_summarized_transcription(self):
         for origin in ('mac', 'android'):
-            self.node("const ORIGIN=" + json.dumps(origin) + ";\n" + """
+            self.node("const ORIGIN=" + json.dumps(origin) + ";\nconst API="+json.dumps("/device-api/"+origin+"/api/knowledge")+";\n" + """
 const sent=[],messages=[],state={audio:[{id:'owned-audio',name:'录音.wav',contentPath:'/owned-audio'}],audioOffset:0,audioHasMore:false,note:{id:'owned-note'},dirty:false,taskSubmitting:false};
 class Element{constructor(tag,css,text){this.tag=tag;this.textContent=text||'';this.children=[];this.handlers={};}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}addEventListener(name,fn){this.handlers[name]=fn;}}
 const elements={},$=id=>elements[id]||(elements[id]=new Element('div'));

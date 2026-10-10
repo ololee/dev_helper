@@ -45,6 +45,22 @@ class KnowledgeAudioTests(unittest.TestCase):
         result = subprocess.run(['node'], input=program, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_delayed_waveform_does_not_replace_restored_completed_job_status(self):
+        self.node("""
+const fields={},$=id=>fields[id]||(fields[id]={hidden:true,value:'',textContent:''});
+const text=(element,value)=>element.textContent=value;
+const audioEditState={epoch:0,wave:{gl:true,upload(){},draw(){}},spectrum:{upload(){},draw(){}}};
+const mediaEditState={kind:null},attachmentMetadata=x=>x;
+const openModal=()=>{},closeModal=()=>true,insertionTarget=()=>null,audioEditControls=()=>{},audioEditWindow=()=>{},audioEditSchedulePoll=()=>{},videoTime=String;
+const api=async()=>({id:'owned',kind:'audio',durationSeconds:1,editable:true});
+const audioEditAdoptJob=async()=>{audioEditState.job={state:'completed'};text($('audio-edit-status'),'剪辑副本已保存，原录音保留。');};
+const audioEditRequestWaveform=async()=>({id:'owned',peaks:[.1]});
+""" + 'async ' + self.functions('openAudioEditor') + """
+(async()=>{await openAudioEditor({id:'owned',name:'Synthetic recording',contentPath:'/owned'});
+if($('audio-edit-status').textContent!=='剪辑副本已保存，原录音保留。')process.exit(1);
+if(!audioEditState.fullPeaks)process.exit(2);})();
+""")
+
     def test_audio_metadata_and_owned_resource_urls_are_validated(self):
         for device in ('mac', 'android'):
             prefix = '/device-api/' + device + '/api/knowledge'

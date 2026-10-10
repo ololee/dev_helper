@@ -65,8 +65,11 @@ class WebAssetsTests(unittest.TestCase):
         rendered = render_knowledge_ui("mac", shared)
         nodes = Elements(rendered)
         self.assertEqual(nodes.by_id["resource-path"][1]["value"], str(shared.resolve()))
-        self.assertIn("const MEDIA_EDITING_SUPPORTED=false;", rendered)
-        self.assertIn("if(MEDIA_EDITING_SUPPORTED)controls.appendChild(edit)", rendered)
+        self.assertIn("const SCREEN_CAPTURE_SUPPORTED=false;", rendered)
+        self.assertIn("if(['video','audio'].includes(metadata.mediaType))controls.appendChild(edit)", rendered)
+        style = re.search(r'<style id="desktop-capability-style">(.*?)</style>', rendered, re.S).group(1)
+        self.assertNotIn("#video-edit-modal", style)
+        self.assertNotIn("#video-export-banner", style)
         self.assertIn("button.hidden=true;button.disabled=true;", rendered)
         for identifier in ("capture-screen-insert", "capture-record-start", "image-edit-modal", "video-edit-modal"):
             self.assertIn(identifier, nodes.by_id)

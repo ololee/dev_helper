@@ -40,7 +40,7 @@ from web_assets import asset_path
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.4.0"
+VERSION = "2.6.1"
 
 
 def tool_result(value):
@@ -557,6 +557,11 @@ class Desktop:
             return JSONResponse({"tools": self.tool_specs()})
         if path == "/api/knowledge/assets/markdown-it.min.js":
             return FileResponse(asset_path("vendor/markdown-it.min.js"), media_type="text/javascript")
+        if path in ("/api/knowledge/assets/motion.js", "/api/knowledge/assets/motion.css"):
+            if request.method not in ("GET", "HEAD"):
+                return Response(status_code=405, headers={"Allow": "GET, HEAD"})
+            name = path.rsplit("/", 1)[1]
+            return FileResponse(asset_path(name), media_type="text/javascript" if name.endswith(".js") else "text/css")
         body = None
         data = None
         if request.method in ("POST", "PUT", "PATCH"):
