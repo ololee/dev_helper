@@ -179,10 +179,40 @@ def unpack_zip(source: Path, output: Path, cancel=None):
     return {'decoder':'zip','files':len(files),'bytes':total}
 
 
+def _game_type(root: Path, paths: list[Path]) -> dict:
+    """Classify entry files, independently of engine strings and manifest claims."""
+    entries={path.relative_to(root).as_posix():path for path in paths[:MAX_FILES]}
+    main=[]; subpackage=[]; ordinary=[]; ordinary_roots=set()
+    for relative,path in entries.items():
+        if path.name=='app-service.js':
+            parent=path.parent
+            companion=next((name for name in ('app.json','page-frame.html','page-frame.js') if (parent/name).relative_to(root).as_posix() in entries),None)
+            if companion:
+                ordinary_roots.add(parent)
+                ordinary.extend([{'path':relative,'match':'标准小程序服务入口'},
+                                 {'path':(parent/companion).relative_to(root).as_posix(),'match':'标准小程序配置或页面入口'}])
+    for relative,path in entries.items():
+        if path.name not in ('game.js','game.json'): continue
+        parents=Path(relative).parts[:-1]
+        is_subpackage=any(part in ('subpackages','wasmcode') for part in parents)
+        if is_subpackage and path.name!='game.js': continue
+        # A page called game.js inside a confirmed ordinary mini-program is not
+        # its main entry. Package/cache wrapper directories remain supported.
+        if not is_subpackage and ('pages' in parents or any(parent!=path.parent and parent in path.parent.parents for parent in ordinary_roots)): continue
+        evidence={'path':relative,'match':'小游戏分包入口' if is_subpackage else '小游戏主包入口'}
+        (subpackage if is_subpackage else main).append(evidence)
+    if main or subpackage:
+        issues=[] if main else [{'code':'game_package_partial','message':'仅发现小游戏分包入口，未发现主包；部分依赖可能尚未缓存。'}]
+        return {'gameType':'game','gameTypeEvidence':(main+subpackage)[:24],'gameTypeIssues':issues}
+    if ordinary:
+        return {'gameType':'miniprogram','gameTypeEvidence':ordinary[:24],'gameTypeIssues':[]}
+    return {'gameType':'unconfirmed','gameTypeEvidence':[],'gameTypeIssues':[]}
+
+
 def inspect_tree(root: Path) -> dict:
     """Use paired file/header/content evidence. Never infer engine from Wasm alone."""
     paths=sorted(p for p in root.rglob('*') if p.is_file() and not p.is_symlink())
-    evidence=[]; versions=[]; cocos=[]; unity=[]; godot=[]; laya=[]; tuanjie=[]; name=''; app_id=''
+    evidence=[]; versions=[]; cocos=[]; unity=[]; godot=[]; laya=[]; tuanjie=[]; names=set(); app_ids=set()
     for file in paths[:MAX_FILES]:
         relative=file.relative_to(root).as_posix(); lower=relative.lower()
         if file.is_file():
@@ -215,10 +245,10 @@ def inspect_tree(root: Path) -> dict:
                     if isinstance(obj,dict):
                         for k in ('appId','appid','app_id'):
                             candidate=obj.get(k)
-                            if isinstance(candidate,str) and re.fullmatch(r'(?:tt|wx)[A-Za-z0-9]{8,64}',candidate): app_id=app_id or candidate
+                            if isinstance(candidate,str) and re.fullmatch(r'(?:tt|wx)[A-Za-z0-9]{8,64}',candidate): app_ids.add(candidate)
                         for k in ('appName','gameName','displayName'):
                             candidate=obj.get(k)
-                            if isinstance(candidate,str) and 0<len(candidate)<=150: name=name or candidate
+                            if isinstance(candidate,str) and 0<len(candidate)<=150: names.add(candidate)
                 except (ValueError,UnicodeError,OSError): pass
     engine='unknown'; chosen=[]
     if tuanjie and (unity or versions): engine='tuanjie'; chosen=tuanjie+unity
@@ -234,6 +264,12 @@ def inspect_tree(root: Path) -> dict:
                 with file.open('rb') as stream: text=stream.read(128*1024).decode('utf-8',errors='ignore')
                 match=re.search(r'(?:Cocos\s*Creator|engineVersion|cc\.ENGINE_VERSION|CocosEngine)["\s:=]+(?:v)?(\d+\.\d+\.\d+)',text,re.I)
                 if match: version=match.group(1); break
+    app_id=next(iter(app_ids)) if len(app_ids)==1 else ''
+    name=next(iter(names)) if len(names)==1 else ''
+    metadata_issues=[]
+    if len(app_ids)>1: metadata_issues.append({'code':'appid_conflict','message':'资源内有多个不同 AppID，无法确定所属小游戏。'})
+    if len(names)>1: metadata_issues.append({'code':'game_name_conflict','message':'资源内有多个不同名称，未采用任一名称；可手动补充。'})
     return {'engine':engine,'engineVariant':'tuanjie' if engine=='tuanjie' else 'unity' if engine=='unity' and re.search(r'f\d+$',version) else '',
             'engineVersion':version,'confidence':'high' if len(chosen)>1 else 'medium' if chosen else 'unknown',
-            'evidence':evidence,'appId':app_id,'name':name,'fileCount':len(paths),'bytes':sum(p.stat().st_size for p in paths)}
+            'evidence':evidence,'appId':app_id,'name':name,'metadataIssues':metadata_issues,
+            'fileCount':len(paths),'bytes':sum(p.stat().st_size for p in paths),**_game_type(root,paths)}

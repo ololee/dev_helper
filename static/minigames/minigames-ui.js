@@ -35,7 +35,8 @@ async function api(path, body, root = API_ROOT, timeoutMs = 45000) {
 }
 function size(value) { const bytes = Number(value); if (!Number.isFinite(bytes) || bytes < 0) return '未知'; if (bytes < 1024) return bytes + ' B'; if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'; if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB'; return (bytes / 1073741824).toFixed(2) + ' GB'; }
 function platformName(value) { return ({ douyin: '抖音', wechat: '微信' })[value] || '来源未确认'; }
-function gameName(game) { return String(game?.name || '').trim() || '名称待补充'; }
+function gameName(game) { return String(game?.name || '').trim() || game?.appId || game?.cacheLabel || '名称待补充'; }
+function gameTypeName(game) { return ({ game: '小游戏', miniprogram: '小程序' })[game?.gameType] || '类型待确认'; }
 function engineName(game, compact = false) {
   const value = String(game?.engine || '').toLowerCase(), variant = String(game?.engineVariant || '').toLowerCase();
   if (['unity', 'tuanjie', '团结'].includes(value)) {
@@ -56,12 +57,12 @@ function archiveUrl(value, root = API_ROOT) { return root + '/minigames/exports/
 
 function renderGames() {
   const search = $('search').value.trim().toLowerCase();
-  const games = ui.games.filter(game => !search || [game.name, game.appId, game.id].some(value => String(value || '').toLowerCase().includes(search)));
+  const games = ui.games.filter(game => !search || [game.name, game.appId, game.cacheLabel, game.id].some(value => String(value || '').toLowerCase().includes(search)));
   const list = $('game-list'); list.replaceChildren();
   for (const game of games) {
     const row = button('', () => selectGame(game), 'game-row'); row.setAttribute('aria-pressed', String(ui.selected?.id === game.id));
-    row.append(node('strong', '', gameName(game)), node('div', 'identifier', game.appId || game.id));
-    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', size(game.bytes)), node('span', 'engine-label', engineName(game, true))); row.append(meta); list.append(row);
+    row.append(node('strong', '', gameName(game)), node('div', 'identifier', game.appId || 'AppID 待确认'));
+    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', gameTypeName(game)), node('span', '', size(game.bytes)), node('span', 'engine-label', engineName(game, true))); row.append(meta); list.append(row);
   }
   $('game-count').textContent = (Number.isFinite(ui.total) ? ui.total : ui.games.length) + ' 个';
   $('library-empty').hidden = games.length > 0;
@@ -84,7 +85,7 @@ async function refreshGames(preferredId) {
 }
 function facts(game) {
   const source = typeof game.source === 'string' ? ({ imported: '导入的游戏包', cache: '设备缓存', 'android-cache': '手机缓存', desktop: '电脑资料' })[game.source] || game.source : game.source?.label || (DEVICE === 'android' ? '手机缓存' : '电脑资料');
-  const values = [['平台', platformName(game.platform)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['缓存包', (Number(game.packageCount) || 0) + ' 个'], ['总大小', size(game.bytes)], ['资料来源', source]];
+  const values = [['平台', platformName(game.platform)], ['缓存类型', gameTypeName(game)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['缓存包', (Number(game.packageCount) || 0) + ' 个'], ['总大小', size(game.bytes)], ['资料来源', source]];
   const list = $('game-facts'); list.replaceChildren(); for (const [label, value] of values) { const item = node('div'); item.append(node('dt', '', label), node('dd', '', value)); list.append(item); }
 }
 function availableModes(game) { game = game || {}; const modes = Array.isArray(game.exportModes) ? game.exportModes.map(value => typeof value === 'string' ? value : value.id || value.mode) : ['raw']; const engine = String(game.engine || '').toLowerCase(); const unityPossible = DEVICE !== 'android' && ['', 'unknown', 'unity', 'tuanjie', '团结'].includes(engine); return [...new Set(['raw', ...modes.filter(value => value !== 'raw' && MODES[value] && (value !== 'unity-project' || unityPossible))])]; }
@@ -97,10 +98,10 @@ function renderModes() {
   $('start-export').disabled = !ui.selected || ui.busy; $('start-export').textContent = '导出' + MODES[ui.mode][0];
 }
 function renderDetail(game) {
-  $('detail-empty').hidden = true; $('detail-content').hidden = false; $('game-name').textContent = gameName(game); $('game-id').textContent = '游戏 ID：' + (game.appId || game.id);
+  $('detail-empty').hidden = true; $('detail-content').hidden = false; $('game-name').textContent = gameName(game); $('game-id').textContent = 'AppID：' + (game.appId || '缓存中未提供');
   const label = engineName(game); $('engine-badge').textContent = label; $('engine-badge').classList.toggle('unknown', label === '未识别引擎'); facts(game);
   if (document.activeElement !== $('name-input')) $('name-input').value = ui.nameDrafts.has(game.id) ? ui.nameDrafts.get(game.id) : game.name || '';
-  const issues = Array.isArray(game.issues) ? game.issues : []; $('game-issues').replaceChildren(); $('game-issues').hidden = !issues.length; for (const issue of issues) $('game-issues').append(node('p', '', typeof issue === 'string' ? issue : issue.message || issue.code || '缓存内容不完整。'));
+  const issues = [...(Array.isArray(game.issues) ? game.issues : []), ...(Array.isArray(game.gameTypeIssues) ? game.gameTypeIssues : []), ...(Array.isArray(game.metadataIssues) ? game.metadataIssues : [])]; $('game-issues').replaceChildren(); $('game-issues').hidden = !issues.length; for (const issue of issues) $('game-issues').append(node('p', '', typeof issue === 'string' ? issue : issue.message || issue.code || '缓存内容不完整。'));
   const evidence = Array.isArray(game.evidence) ? game.evidence : []; $('evidence-list').replaceChildren();
   for (const item of evidence) { const row = node('li', '', item.path || '包内线索'); if (item.match) row.append(node('span', '', item.match)); $('evidence-list').append(row); }
   const unity = ['unity', 'tuanjie', '团结'].includes(String(game.engine || '').toLowerCase());

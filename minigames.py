@@ -183,10 +183,12 @@ class MiniGameService:
                     try: metadata=json.loads(manifest.read_text()).get('game',{})
                     except (ValueError,AttributeError): pass
                 analysis=inspect_tree(pending/'input')
+                packages=[p for p in files(pending/'input') if p.suffix.lower() in ('.pkg','.wxapkg','.ttpkg')]
                 game={'id':id,'platform':platform if platform!='unknown' else metadata.get('platform','unknown'),
                       'appId':analysis['appId'] or metadata.get('appId',''),'name':name or analysis['name'] or metadata.get('name',''),
+                      'cacheLabel':packages[0].name if len(packages)==1 else '',
                       'version':str(metadata.get('version',''))[:100],'source':'imported','createdAt':now(),'updatedAt':now(),
-                      'issues':[],'packageCount':len([p for p in files(pending/'input') if p.suffix.lower() in ('.pkg','.wxapkg','.ttpkg')]),
+                      'issues':[],'packageCount':len(packages),
                       'exportModes':['raw','unpacked','assets','unity-project'],**{k:v for k,v in analysis.items() if k not in ('appId','name')}}
                 if game['platform'] not in ('douyin','wechat','unknown'): game['platform']='unknown'
                 if not isinstance(game['appId'],str) or len(game['appId'])>100: game['appId']=''
@@ -214,7 +216,7 @@ class MiniGameService:
         analysis=inspect_tree(root or self.game_root/id/'input')
         with self.lock:
             game=self._read(self.game_root,id)
-            for key in ('engine','engineVersion','engineVariant','evidence','confidence'): game[key]=analysis[key]
+            for key in ('engine','engineVersion','engineVariant','evidence','confidence','gameType','gameTypeEvidence','gameTypeIssues','metadataIssues'): game[key]=analysis[key]
             if not game['appId']: game['appId']=analysis['appId']
             if not game['name']: game['name']=analysis['name']
             game['updatedAt']=now(); write_json(self.game_root/id/'manifest.json',game)

@@ -29,6 +29,17 @@ def tpkg(entries):
     return header+table+payload
 
 
+def wxapkg(entries):
+    """Synthetic standard WXAPKG with Android's slash-prefixed directory entries."""
+    index_size=4+sum(4+len(name.encode('utf-8'))+8 for name,_ in entries)
+    offset=14+index_size; table=bytearray(struct.pack('>I',len(entries))); payload=bytearray()
+    for name,raw in entries:
+        encoded=name.encode('utf-8')
+        table.extend(struct.pack('>I',len(encoded))+encoded+struct.pack('>II',offset,len(raw)))
+        payload.extend(raw); offset+=len(raw)
+    return b'\xbe'+struct.pack('>III',0,index_size,len(payload))+b'\xed'+table+payload
+
+
 def wait(service,job):
     end=time.monotonic()+8
     while job['state'] in ('queued','running'):
@@ -38,6 +49,74 @@ def wait(service,job):
 
 
 class FormatsTests(unittest.TestCase):
+    def test_wechat_main_game_entries_and_wrapper_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); source=root/'main.wxapkg'; output=root/'unpacked/packages/cache/main'
+            source.write_bytes(wxapkg([('/game.js',b'Laya.init(100,100);'),('/game.json',b'{"deviceOrientation":"landscape"}')]))
+            original=source.read_bytes(); unpack_package(source,output)
+            self.assertTrue((output/'game.js').is_file())
+            analysis=inspect_tree(root/'unpacked')
+            self.assertEqual(analysis['gameType'],'game')
+            self.assertEqual(analysis['engine'],'laya')
+            self.assertTrue(any(item['match']=='小游戏主包入口' for item in analysis['gameTypeEvidence']))
+            self.assertEqual(analysis['gameTypeIssues'],[])
+            self.assertEqual(source.read_bytes(),original)
+
+    def test_wechat_subpackage_is_game_with_partial_issue(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for index,prefix in enumerate(('subpackages/chapter','wasmcode')):
+                source=root/f'chapter-{index}.wxapkg'; output=root/f'out-{index}'
+                source.write_bytes(wxapkg([('/'+prefix+'/game.js',b'cc.game.run();'),('/'+prefix+'/texture.bin',b'fixture')]))
+                unpack_package(source,output); analysis=inspect_tree(output)
+                self.assertEqual(analysis['gameType'],'game')
+                self.assertEqual(analysis['engine'],'cocos')
+                self.assertEqual(analysis['gameTypeIssues'][0]['code'],'game_package_partial')
+                self.assertEqual(analysis['gameTypeEvidence'][0]['match'],'小游戏分包入口')
+            resource=root/'resource.wxapkg'
+            resource.write_bytes(wxapkg([('/subpackages/chapter/game.json',b'{}')]))
+            unpack_package(resource,root/'resource')
+            self.assertEqual(inspect_tree(root/'resource')['gameType'],'unconfirmed')
+
+    def test_wechat_ordinary_miniprogram_requires_paired_entry_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for index,companion in enumerate(('app.json','page-frame.html','page-frame.js')):
+                source=root/f'ordinary-{index}.wxapkg'; output=root/f'out-{index}'
+                source.write_bytes(wxapkg([('/app-service.js',b'App({});'),('/'+companion,b'{}'),('/pages/game.js',b'Page({});')]))
+                unpack_package(source,output)
+                self.assertEqual(inspect_tree(output)['gameType'],'miniprogram')
+            separated=root/'separated'; (separated/'a').mkdir(parents=True); (separated/'b').mkdir()
+            (separated/'a/app-service.js').write_text('App({});')
+            (separated/'b/app.json').write_text('{}')
+            (separated/'b/page-frame.html').write_text('<html></html>')
+            self.assertEqual(inspect_tree(separated)['gameType'],'unconfirmed')
+            lone_page=root/'lone/pages'; lone_page.mkdir(parents=True)
+            (lone_page/'game.js').write_text('Page({});')
+            self.assertEqual(inspect_tree(root/'lone')['gameType'],'unconfirmed')
+
+    def test_wechat_plugin_and_unrelated_manifest_cannot_claim_game_type(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); source=root/'plugin.wxapkg'
+            source.write_bytes(wxapkg([('/plugin.js',b'module.exports = {};'),('/plugin.json',b'{}'),
+                ('/project.config.json',b'{"compileType":"game","projectname":"generic-project"}'),
+                ('/unrelated/manifest.json',b'{"gameType":"game","type":"game"}')]))
+            unpack_package(source,root/'out'); analysis=inspect_tree(root/'out')
+            self.assertEqual(analysis['gameType'],'unconfirmed')
+            self.assertEqual(analysis['gameTypeEvidence'],[])
+            self.assertEqual(analysis['name'],'')
+
+    def test_conflicting_metadata_remains_unknown(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'config.json').write_text(json.dumps({'appId':'wx11111111','gameName':'名称甲'}))
+            (root/'metadata.json').write_text(json.dumps({'appId':'wx22222222','gameName':'名称乙'}))
+            (root/'game.js').write_text('/* game entry */')
+            analysis=inspect_tree(root)
+            self.assertEqual(analysis['appId'],''); self.assertEqual(analysis['name'],'')
+            self.assertEqual({issue['code'] for issue in analysis['metadataIssues']},{'appid_conflict','game_name_conflict'})
+            self.assertEqual(analysis['gameType'],'game')
+
     def test_tpkg_long_text_and_binary(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); source=root/'test.pkg'
@@ -187,8 +266,11 @@ class LibraryTests(unittest.TestCase):
             try:
                 imported=wait(service,service.import_archive(original)); self.assertEqual(imported['state'],'completed',imported)
                 game=imported['result']['game']; self.assertEqual(game['appId'],'tt1234567890abcd')
+                self.assertEqual(game['cacheLabel'],'game.pkg')
+                self.assertEqual(game['gameType'],'unconfirmed')
                 exported=wait(service,service.export({'gameId':game['id'],'mode':'assets','notify':False})); self.assertEqual(exported['state'],'completed',exported)
                 self.assertEqual(service.get_game(game['id'])['game']['engine'],'cocos')
+                self.assertEqual(service.get_game(game['id'])['game']['gameType'],'game')
                 self.assertTrue(exported['result']['export']['spine'])
                 with zipfile.ZipFile(service.export_file(exported['result']['exportId'])) as z:
                     self.assertTrue(any(n.endswith('hero.json') for n in z.namelist()))

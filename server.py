@@ -43,7 +43,7 @@ from assetripper import AssetRipperAdapter
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 
 def tool_result(value):
