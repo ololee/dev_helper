@@ -214,7 +214,14 @@ function renderTasks() {
   for (const [key, view] of ui.jobViews) if (!keys.has(key)) { view.item.remove(); ui.jobViews.delete(key); }
 }
 async function refreshJob(job) {
-  if (job.local) return; const previous = job.state; const data = normalizeJob(await api('/minigames/jobs/' + encodeURIComponent(job.id), undefined, job.apiRoot)); Object.assign(job, data); delete job.pollError;
+  if (job.local) return; const previous = job.state; let data;
+  try { data = normalizeJob(await api('/minigames/jobs/' + encodeURIComponent(job.id), undefined, job.apiRoot)); }
+  catch (error) {
+    if (error.message !== '小游戏任务不存在') throw error;
+    Object.assign(job, { state: 'failed', progress: null, error: '设备已找不到这条任务。请刷新游戏列表查看结果，需要时重新执行。' });
+    delete job.pollError; persistJobs(); renderTasks(); return;
+  }
+  Object.assign(job, data); delete job.pollError;
   if (!FINISHED.has(previous) && FINISHED.has(job.state)) await onFinish(job); persistJobs(); renderTasks(); renderExports();
 }
 async function cancelJob(job) { const data = await api('/minigames/jobs/' + encodeURIComponent(job.id) + '/cancel', {}, job.apiRoot); Object.assign(job, normalizeJob(data)); persistJobs(); renderTasks(); toast('已请求取消任务。'); }
