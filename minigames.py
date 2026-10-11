@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -19,9 +20,82 @@ import zipfile
 from minigame_formats import ASSET_EXT, MAX_EXPANDED, FormatError, check_cancel, inspect_tree, safe_path, unpack_package, unpack_zip
 
 BASE='/api/knowledge/minigames'
+ICON_LIMIT=2*1024*1024
+ICON_SUFFIXES=('.png','.jpg','.webp','.gif')
 
 
 def now(): return int(time.time()*1000)
+
+
+def cache_modified_at(metadata):
+    """Preserve source cache time, never substitute archive/import/scan time."""
+    value=metadata.get('cacheModifiedAt')
+    if isinstance(value,(int,float)) and not isinstance(value,bool) and 0<value<=8640000000000000:
+        return int(value)
+    source=metadata.get('source')
+    sources=source if isinstance(source,list) else [source] if isinstance(source,dict) else []
+    stamps=[]
+    for entry in sources:
+        value=entry.get('modifiedSeconds') if isinstance(entry,dict) else None
+        if isinstance(value,(int,float)) and not isinstance(value,bool) and 0<value<=8640000000000:
+            stamps.append(int(value*1000))
+    return max(stamps,default=0)
+
+
+def source_metadata(root):
+    for name in ('devhelper-export.json','manifest.json'):
+        path=root/name
+        if not path.is_file() or path.stat().st_size>16*1024**2: continue
+        try:
+            value=json.loads(path.read_text('utf-8'))
+            game=value.get('game') if isinstance(value,dict) else None
+            if isinstance(game,dict):
+                game=dict(game)
+                if not cache_modified_at(game):
+                    # Old phone raw archives stored the original stat in the
+                    # file manifest while game.source remained "phone-cache".
+                    stamp=cache_modified_at({'source':value.get('files')})
+                    if stamp: game['cacheModifiedAt']=stamp
+                return game
+        except (ValueError,UnicodeError,OSError): pass
+    return {}
+
+
+def metadata_text(value,limit):
+    return value.strip() if isinstance(value,str) and len(value.strip())<=limit else ''
+
+
+def field_source(metadata,field,value):
+    if not value: return ''
+    supplied=metadata_text(metadata.get(field),160 if field=='name' else 100)
+    return (metadata_text(metadata.get(field+'Source'),100) or 'imported-metadata') if supplied else 'package-metadata'
+
+
+def icon_suffix(path):
+    if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=ICON_LIMIT: return None
+    with path.open('rb') as source: header=source.read(16)
+    if header.startswith(b'\x89PNG\r\n\x1a\n'): return '.png'
+    if header.startswith(b'\xff\xd8\xff'): return '.jpg'
+    if header.startswith((b'GIF87a',b'GIF89a')): return '.gif'
+    if header.startswith(b'RIFF') and header[8:12]==b'WEBP': return '.webp'
+    return None
+
+
+def normalized_icon(data):
+    if not isinstance(data,bytes) or not 0<len(data)<=ICON_LIMIT: raise ValueError('图标须为不超过 2 MiB 的 PNG、JPEG 或 WebP 图片。')
+    try:
+        from PIL import Image, ImageOps
+    except ImportError: raise ValueError('请安装电脑版依赖中的 Pillow 后再设置图标。') from None
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            if source.format not in ('PNG','JPEG','WEBP'): raise ValueError('请选择 PNG、JPEG 或 WebP 图片。')
+            if not 0<source.width<=2048 or not 0<source.height<=2048: raise ValueError('图标原图的宽高均须不超过 2048 像素。')
+            source.load()
+            image=ImageOps.exif_transpose(source).convert('RGBA')
+            image.thumbnail((256,256),Image.Resampling.LANCZOS)
+            result=io.BytesIO(); image.save(result,format='PNG',optimize=True)
+            return result.getvalue()
+    except (OSError,SyntaxError,Image.DecompressionBombError): raise ValueError('图标图片无法完整解码，请重新选择 PNG、JPEG 或 WebP 图片。') from None
 
 
 def identifier(value):
@@ -80,14 +154,15 @@ class MiniGameService:
         if not path.is_file(): raise FileNotFoundError('未找到该小游戏、导出或任务。')
         return json.loads(path.read_text('utf-8'))
 
-    def list_games(self, platform='all',offset=0,limit=40):
+    def list_games(self, platform='all',offset=0,limit=40,sort='latest'):
         if platform not in ('all','douyin','wechat','unknown'): raise ValueError('平台无效。')
+        if sort not in ('latest','earliest'): raise ValueError('排序方式无效。')
         if not isinstance(offset,int) or not isinstance(limit,int) or offset<0 or not 1<=limit<=100: raise ValueError('分页参数无效。')
         with self.lock:
             rows=[json.loads(p.read_text('utf-8')) for p in self.game_root.glob('*/manifest.json') if not p.parent.name.startswith('.')]
         rows=[v for v in rows if platform=='all' or v['platform']==platform]
-        rows.sort(key=lambda v:v['updatedAt'],reverse=True)
-        return {'games':rows[offset:offset+limit],'total':len(rows),'offset':offset,'limit':limit,'hasMore':offset+limit<len(rows)}
+        rows.sort(key=lambda v:(not cache_modified_at(v),(-1 if sort=='latest' else 1)*cache_modified_at(v),v['id']))
+        return {'games':rows[offset:offset+limit],'total':len(rows),'offset':offset,'limit':limit,'sort':sort,'hasMore':offset+limit<len(rows)}
 
     def get_game(self,id):
         with self.lock:
@@ -96,11 +171,49 @@ class MiniGameService:
         return {'game':game,'exports':sorted((e for e in exports if e['gameId']==id),key=lambda e:e['createdAt'],reverse=True)}
 
     def metadata(self,id,fields):
-        if set(fields)-{'name'} or not isinstance(fields.get('name'),str) or not 1<=len(fields['name'].strip())<=150: raise ValueError('名称须为 1 至 150 个字符。')
+        if set(fields)-{'name'} or not isinstance(fields.get('name'),str) or not 1<=len(fields['name'].strip())<=160: raise ValueError('名称须为 1 至 160 个字符。')
         with self.lock:
             game=self._read(self.game_root,id); game.update(name=fields['name'].strip(),nameSource='manual',updatedAt=now())
             write_json(self.game_root/id/'manifest.json',game)
         return game
+
+    def icon_file(self,id):
+        game=self._read(self.game_root,id)
+        if game.get('iconAvailable') is not True: raise FileNotFoundError('未找到已关联的小游戏图标。')
+        for suffix in ICON_SUFFIXES:
+            path=self.game_root/id/('icon'+suffix)
+            if icon_suffix(path)==suffix: return path
+        raise FileNotFoundError('未找到已关联的小游戏图标。')
+
+    def metadata_icon(self,id,data):
+        data=normalized_icon(data)
+        with self.lock:
+            game=self._read(self.game_root,id)
+            path=self.game_root/id/'icon.png'; pending=path.with_suffix('.pending')
+            pending.write_bytes(data); os.chmod(pending,0o600); os.replace(pending,path)
+            for suffix in ICON_SUFFIXES:
+                if suffix!='.png': (self.game_root/id/('icon'+suffix)).unlink(missing_ok=True)
+            game.update(iconAvailable=True,iconUrl=BASE+'/games/'+id+'/icon',iconSource='manual',updatedAt=now())
+            write_json(self.game_root/id/'manifest.json',game)
+        return game
+
+    def _import_icon(self,root,folder,metadata,game):
+        """Only an explicit archived association can supply a local raster icon."""
+        relative=metadata.get('iconArchivePath')
+        if metadata.get('iconAvailable') is not True or not isinstance(relative,str): return
+        try:
+            if game.get('iconSource')=='manual' and icon_suffix(folder/'icon.png')=='.png': return
+            path=root/safe_path(relative)
+            suffix=icon_suffix(path)
+            if suffix is None: return
+            # Extracted archive paths have already passed traversal/symlink checks.
+            target=folder/'icon.png'; pending=target.with_suffix('.pending')
+            pending.write_bytes(normalized_icon(path.read_bytes())); os.chmod(pending,0o600); os.replace(pending,target)
+            for other in ICON_SUFFIXES:
+                if other!='.png': (folder/('icon'+other)).unlink(missing_ok=True)
+            game.update(iconAvailable=True,iconUrl=BASE+'/games/'+game['id']+'/icon',
+                        iconSource=metadata_text(metadata.get('iconSource'),100) or 'imported-metadata')
+        except (ValueError,OSError,FormatError): return
 
     def jobs(self):
         with self.lock: rows=[json.loads(p.read_text('utf-8')) for p in self.job_root.glob('*.json')]
@@ -168,7 +281,7 @@ class MiniGameService:
     def import_archive(self,source: Path,platform='unknown',name=''):
         """Copy input before returning job, so a caller cannot race attachment deletion."""
         if platform not in ('unknown','douyin','wechat'): raise ValueError('平台无效。')
-        if not isinstance(name,str) or len(name)>150: raise ValueError('名称过长。')
+        if not isinstance(name,str) or len(name)>160: raise ValueError('名称过长。')
         if source.stat().st_size>MAX_EXPANDED: raise FormatError('单次资源包超过 32 GiB，请分包处理。')
         id=str(uuid.uuid4()); pending=self.game_root/('.pending-'+id); pending.mkdir()
         try: shutil.copyfile(source,pending/'original.zip')
@@ -177,22 +290,24 @@ class MiniGameService:
             published=False
             try:
                 report(message='读取导入包索引'); unpack_zip(pending/'original.zip',pending/'input',event)
-                metadata={}
-                manifest=pending/'input/manifest.json'
-                if manifest.is_file() and manifest.stat().st_size<=16*1024**2:
-                    try: metadata=json.loads(manifest.read_text()).get('game',{})
-                    except (ValueError,AttributeError): pass
+                metadata=source_metadata(pending/'input')
                 analysis=inspect_tree(pending/'input')
                 packages=[p for p in files(pending/'input') if p.suffix.lower() in ('.pkg','.wxapkg','.ttpkg')]
                 game={'id':id,'platform':platform if platform!='unknown' else metadata.get('platform','unknown'),
-                      'appId':analysis['appId'] or metadata.get('appId',''),'name':name or analysis['name'] or metadata.get('name',''),
+                      'appId':metadata_text(metadata.get('appId'),100) or analysis['appId'],
+                      'name':name.strip() or metadata_text(metadata.get('name'),160) or analysis['name'],
                       'cacheLabel':packages[0].name if len(packages)==1 else '',
                       'version':str(metadata.get('version',''))[:100],'source':'imported','createdAt':now(),'updatedAt':now(),
+                      'cacheModifiedAt':cache_modified_at(metadata),'iconAvailable':False,
                       'issues':[],'packageCount':len(packages),
                       'exportModes':['raw','unpacked','assets','unity-project'],**{k:v for k,v in analysis.items() if k not in ('appId','name')}}
                 if game['platform'] not in ('douyin','wechat','unknown'): game['platform']='unknown'
                 if not isinstance(game['appId'],str) or len(game['appId'])>100: game['appId']=''
-                if not isinstance(game['name'],str) or len(game['name'])>150: game['name']=''
+                if not isinstance(game['name'],str) or len(game['name'])>160: game['name']=''
+                game['nameSource']='manual' if name.strip() else field_source(metadata,'name',game['name'])
+                game['appIdSource']=field_source(metadata,'appId',game['appId'])
+                if metadata_text(metadata.get('metadataSource'),150): game['metadataSource']=metadata_text(metadata['metadataSource'],150)
+                self._import_icon(pending/'input',pending,metadata,game)
                 if not game['appId']: game['issues'].append('包内未提供 AppID；缓存文件名不能作为 AppID。')
                 if not game['name']: game['issues'].append('名称未知，可手动补充。')
                 if game['engine']=='unknown': game['issues'].append('需解包后再检查引擎。')
@@ -214,11 +329,19 @@ class MiniGameService:
 
     def _refresh(self,id,root=None):
         analysis=inspect_tree(root or self.game_root/id/'input')
+        metadata=source_metadata(self.game_root/id/'input')
         with self.lock:
             game=self._read(self.game_root,id)
             for key in ('engine','engineVersion','engineVariant','evidence','confidence','gameType','gameTypeEvidence','gameTypeIssues','metadataIssues'): game[key]=analysis[key]
-            if not game['appId']: game['appId']=analysis['appId']
-            if not game['name']: game['name']=analysis['name']
+            if not game['appId']:
+                game['appId']=metadata_text(metadata.get('appId'),100) or analysis['appId']
+                game['appIdSource']=field_source(metadata,'appId',game['appId'])
+            if not game['name'] or game.get('nameSource') not in ('manual',None) and metadata_text(metadata.get('name'),160):
+                game['name']=metadata_text(metadata.get('name'),160) or analysis['name']
+                game['nameSource']=field_source(metadata,'name',game['name'])
+            if not cache_modified_at(game): game['cacheModifiedAt']=cache_modified_at(metadata)
+            if metadata_text(metadata.get('metadataSource'),150): game['metadataSource']=metadata_text(metadata['metadataSource'],150)
+            self._import_icon(self.game_root/id/'input',self.game_root/id,metadata,game)
             game['updatedAt']=now(); write_json(self.game_root/id/'manifest.json',game)
         return game
 
@@ -301,6 +424,14 @@ class MiniGameService:
                             if mode=='assets' and file.suffix.lower() not in ASSET_EXT and not file.name.lower().endswith(('.atlas.txt','.json.txt','.skel.bytes')): continue
                             dest=content/file.relative_to(pending/'unpacked'); dest.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(file,dest)
                     shutil.rmtree(pending/'unpacked',ignore_errors=True)
+                exported_game={key:game[key] for key in ('platform','appId','name','nameSource','appIdSource','metadataSource','cacheLabel','version','cacheModifiedAt') if key in game}
+                exported_game['iconAvailable']=False
+                try:
+                    icon=self.icon_file(id)
+                    icon_path='metadata/app-icon'+icon.suffix
+                    target=content/icon_path; target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(icon,target)
+                    exported_game.update(iconAvailable=True,iconArchivePath=icon_path,iconSource=game.get('iconSource','imported-metadata'))
+                except FileNotFoundError: pass
                 check_cancel(event); report(message='建立素材索引并打包',progress=85)
                 inventory=[{'path':p.relative_to(content).as_posix(),'bytes':p.stat().st_size,'kind':file_kind(p)} for p in files(content)]
                 if not inventory: raise ValueError('没有可导出的素材。原包保留，请选择原包或解包文件。')
@@ -325,7 +456,7 @@ class MiniGameService:
                         skeletons.append({'skeleton':item['path'],'version':version,'atlas':atlas,'textures':atlases.get(atlas,[]),
                                           'ready':bool(atlas) and not missing,'issues':['未找到匹配图集'] if not atlas else ['缺少纹理：'+p for p in missing]})
                 manifest={'id':export_id,'gameId':id,'mode':mode,'name':game['name'] or game['appId'] or '小游戏资源',
-                          'createdAt':now(),'fileCount':len(inventory),'files':inventory,'spine':skeletons,'detail':detail,
+                          'createdAt':now(),'fileCount':len(inventory),'files':inventory,'spine':skeletons,'detail':detail,'game':exported_game,
                           'archivePath':BASE+'/exports/'+export_id+'/archive'}
                 with zipfile.ZipFile(pending/'archive.zip','w',compression=zipfile.ZIP_DEFLATED,compresslevel=1,allowZip64=True) as archive:
                     for item in inventory:
@@ -434,14 +565,14 @@ class MiniGameService:
                     'annotations':{'readOnlyHint':read_only,'destructiveHint':False,'idempotentHint':read_only,'openWorldHint':not read_only}}
         ident={'type':'string','format':'uuid'}
         return [
-            spec('list','List imported mini-games with AppID/name mapping and engine evidence. Phone cache scans are separate.',{'platform':{'enum':['all','douyin','wechat','unknown']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100}}),
+            spec('list','List imported mini-games with AppID/name mapping, associated icon and cache modification time. latest/earliest sort applies before pagination; unknown times are last. Phone cache scans are separate.',{'platform':{'enum':['all','douyin','wechat','unknown']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100},'sort':{'enum':['latest','earliest']}}),
             spec('get','Read one game and its completed immutable exports.',{'id':ident},('id',)),
             spec('scan','Refresh imported desktop games. To scan host caches use the Android minigame tool through devhelper_call_tool.',{'platform':{'enum':['all','douyin','wechat','unknown']}},read_only=False),
-            spec('import','Import a selected ZIP attachment, including a phone raw-cache export. Copies original before queuing; poll returned job.',{'attachmentId':ident,'platform':{'enum':['douyin','wechat','unknown']},'name':{'type':'string','maxLength':150}},('attachmentId',),False),
+            spec('import','Import a selected ZIP attachment, including a phone raw-cache export. Copies original before queuing; poll returned job.',{'attachmentId':ident,'platform':{'enum':['douyin','wechat','unknown']},'name':{'type':'string','maxLength':160}},('attachmentId',),False),
             spec('export','Queue raw, unpacked, asset or reconstructed Unity/Tuanjie project export. Originals retained. Poll job; queued is not success. summarize explicitly sends inventory to configured DeepSeek, not binary files.',{'gameId':ident,'mode':{'enum':['raw','unpacked','assets','unity-project']},'summarize':{'type':'boolean'},'notify':{'type':'boolean'}},('gameId','mode'),False),
             spec('job','Read persistent job state, progress and completed output. No task is replayed.',{'id':ident},('id',)),
             spec('cancel','Cancel a queued/running job; poll until stopped. Completed outputs and original caches remain.',{'id':ident},('id',),False),
-            spec('rename','Edit a game display name; does not guess or change AppID.',{'id':ident,'name':{'type':'string','minLength':1,'maxLength':150}},('id','name'),False),
+            spec('rename','Edit a game display name; does not guess or change AppID.',{'id':ident,'name':{'type':'string','minLength':1,'maxLength':160}},('id','name'),False),
             spec('spine','Import identified Spine skeletons/atlases/textures from one export into the existing player and return openUrl.',{'exportId':ident,'skeleton':{'type':'string','maxLength':2048}},('exportId',),False),
             spec('summarize','Explicitly send a bounded resource inventory to DeepSeek and store Markdown. No binary/code uploads or file moves.',{'exportId':ident},('exportId',),False),
             spec('assetripper_status','Read computer AssetRipper/UnityPy availability; Unity export never runs on Android.'),

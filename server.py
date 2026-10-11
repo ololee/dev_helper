@@ -43,7 +43,7 @@ from assetripper import AssetRipperAdapter
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.8.1"
+VERSION = "2.8.2"
 
 
 def tool_result(value):
@@ -639,7 +639,7 @@ class Desktop:
         route = path.removeprefix(MINIGAME_BASE + '/').split('/')
         method = request.method
         data = {}
-        if method == 'POST':
+        if method == 'POST' and not (len(route) == 3 and route[0] == 'games' and route[2] == 'icon'):
             raw = await request.body()
             if len(raw) > 65536:
                 return JSONResponse({'error': '请求超过 64 KiB。'}, 413)
@@ -652,8 +652,20 @@ class Desktop:
         try:
             operation = None
             if route == ['games'] and method == 'GET':
-                operation = lambda: service.list_games(request.query_params.get('platform', 'all'), int(request.query_params.get('offset', 0)), int(request.query_params.get('limit', 40)))
+                operation = lambda: service.list_games(request.query_params.get('platform', 'all'), int(request.query_params.get('offset', 0)), int(request.query_params.get('limit', 40)), request.query_params.get('sort', 'latest'))
             elif len(route) == 2 and route[0] == 'games' and method == 'GET': operation = lambda: service.get_game(route[1])
+            elif len(route) == 3 and route[0] == 'games' and route[2] == 'icon' and method in ('GET', 'HEAD'):
+                file = await asyncio.to_thread(service.icon_file, route[1])
+                return FileResponse(file, media_type=mimetypes.guess_type(file.name)[0] or 'image/png',
+                                    headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'})
+            elif len(route) == 3 and route[0] == 'games' and route[2] == 'icon' and method == 'POST':
+                image_buffer = bytearray()
+                async for chunk in request.stream():
+                    if len(chunk) > 2 * 1024 * 1024 - len(image_buffer):
+                        return JSONResponse({'error': '图标超过 2 MiB。'}, 413)
+                    image_buffer.extend(chunk)
+                image = bytes(image_buffer)
+                operation = lambda: service.metadata_icon(route[1], image)
             elif len(route) == 3 and route[0] == 'games' and route[2] == 'metadata' and method == 'POST': operation = lambda: service.metadata(route[1], data)
             elif route == ['jobs'] and method == 'GET': operation = service.jobs
             elif len(route) == 2 and route[0] == 'jobs' and method == 'GET': operation = lambda: service.job(route[1])
@@ -679,7 +691,10 @@ class Desktop:
             elif route == ['assetripper', 'configure'] and method == 'POST': operation = lambda: service.assetripper.configure(data)
             elif route == ['assetripper', 'setup'] and method == 'POST': operation = lambda: service.setup_assetripper(data)
             if operation is None: return JSONResponse({'error': '未找到小游戏接口。'}, 404)
-            return JSONResponse(await asyncio.to_thread(operation))
+            value = await asyncio.to_thread(operation)
+            if request.url.path.startswith('/device-api/mac/'):
+                value = transform_paths(value, 'mac')
+            return JSONResponse(value)
         except FileNotFoundError as error: return JSONResponse({'error': str(error)}, 404)
         except Exception as error:
             if isinstance(error, ValueError) or error.__class__.__name__ == 'AssetRipperError':

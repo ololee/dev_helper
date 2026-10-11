@@ -79,6 +79,7 @@
     "tests/test_knowledge.py",
     "tests/test_knowledge_audio_ui.py",
     "tests/test_media.py",
+    "tests/test_minigame_http.py",
     "tests/test_minigames.py",
     "tests/test_motion.py",
     "tests/test_notes_ui.py",

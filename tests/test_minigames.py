@@ -171,6 +171,141 @@ class FormatsTests(unittest.TestCase):
 
 
 class LibraryTests(unittest.TestCase):
+    def test_cache_time_sort_is_global_unknown_last_and_stable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'source.zip'
+            try:
+                ids={}
+                for label,stamp in (('unknown',None),('older',1700000000000),('newer',1700000100000),('same',1700000100000)):
+                    game={'platform':'wechat','name':label}
+                    if stamp is not None: game['cacheModifiedAt']=stamp
+                    with zipfile.ZipFile(source,'w') as archive:
+                        archive.writestr('manifest.json',json.dumps({'game':game})); archive.writestr('fixture.bin',b'fixture')
+                    ids[label]=wait(service,service.import_archive(source))['result']['gameId']
+                latest=service.list_games('wechat',0,2,'latest')
+                self.assertEqual([row['id'] for row in latest['games']],sorted([ids['newer'],ids['same']]))
+                self.assertEqual([row['id'] for row in service.list_games('wechat',2,2,'latest')['games']],[ids['older'],ids['unknown']])
+                earliest=service.list_games('wechat',0,100,'earliest')['games']
+                self.assertEqual(earliest[0]['id'],ids['older']); self.assertEqual(earliest[-1]['id'],ids['unknown'])
+                self.assertEqual(earliest[-1]['cacheModifiedAt'],0)
+                self.assertGreater(earliest[-1]['createdAt'],0)
+                with self.assertRaises(ValueError): service.list_games(sort='updated')
+            finally: service.close()
+
+    def test_phone_metadata_icon_and_time_survive_manual_edit_refresh_and_export(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'phone.zip'
+            encoded=io.BytesIO(); Image.new('RGB',(500,240),'red').save(encoded,format='PNG')
+            phone={'platform':'wechat','appId':'wx1234567890abcdef','name':'可靠的名称','nameSource':'wechat-metadata-index',
+                   'appIdSource':'wechat-metadata-index','metadataSource':'wechat-metadata-index','cacheModifiedAt':1700000000123,
+                   'iconAvailable':True,'iconArchivePath':'metadata/app-icon.png','iconSource':'wechat-metadata-index'}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps({'game':phone})); archive.writestr('metadata/app-icon.png',encoded.getvalue())
+                archive.writestr('payload/cache/main.wxapkg',wxapkg([('/game.js',b'cc.game.run();'),('/game.json',b'{}')]))
+            original=source.read_bytes()
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']; id=game['id']
+                self.assertEqual(game['name'],phone['name']); self.assertEqual(game['appId'],phone['appId'])
+                self.assertEqual(game['nameSource'],'wechat-metadata-index'); self.assertEqual(game['cacheModifiedAt'],1700000000123)
+                self.assertEqual(game['iconUrl'],'/api/knowledge/minigames/games/'+id+'/icon')
+                with Image.open(service.icon_file(id)) as icon: self.assertEqual(icon.size,(256,123)); self.assertEqual(icon.format,'PNG')
+                service.metadata(id,{'name':'我手动指定的名称'})
+                manual=io.BytesIO(); Image.new('RGB',(10,20),'blue').save(manual,format='JPEG')
+                changed=service.metadata_icon(id,manual.getvalue()); self.assertEqual(changed['iconSource'],'manual')
+                manual_png=service.icon_file(id).read_bytes()
+                service._refresh(id)
+                refreshed=service.get_game(id)['game']; self.assertEqual(refreshed['name'],'我手动指定的名称')
+                self.assertEqual(refreshed['nameSource'],'manual'); self.assertEqual(refreshed['iconSource'],'manual')
+                self.assertEqual(service.icon_file(id).read_bytes(),manual_png)
+                self.assertEqual(refreshed['cacheModifiedAt'],1700000000123)
+                exported=wait(service,service.export({'gameId':id,'mode':'raw','notify':False})); self.assertEqual(exported['state'],'completed',exported)
+                archive_path=service.export_file(exported['result']['exportId'])
+                with zipfile.ZipFile(archive_path) as archive:
+                    manifest=json.loads(archive.read('devhelper-export.json'))
+                    self.assertEqual(manifest['game']['nameSource'],'manual')
+                    self.assertEqual(manifest['game']['iconArchivePath'],'metadata/app-icon.png')
+                    self.assertEqual(archive.read('metadata/app-icon.png'),manual_png)
+                imported=wait(service,service.import_archive(archive_path))['result']['game']
+                self.assertEqual(imported['name'],'我手动指定的名称'); self.assertEqual(imported['nameSource'],'manual')
+                self.assertEqual(imported['iconSource'],'manual'); self.assertEqual(imported['cacheModifiedAt'],1700000000123)
+                self.assertEqual(service.icon_file(imported['id']).read_bytes(),manual_png)
+                self.assertEqual(source.read_bytes(),original)
+            finally: service.close()
+
+    def test_old_phone_archive_recovers_cache_time_without_inventing_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'phone.zip'
+            metadata={'platform':'wechat','source':[{'modifiedSeconds':1700000000},{'modifiedSeconds':1700000200},{'modifiedSeconds':-1}]}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps({'game':metadata})); archive.writestr('payload/cache/12345.wxapkg',b'unknown fixture')
+                archive.writestr('unrelated-image.png',b'not an associated icon')
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']
+                self.assertEqual(game['cacheModifiedAt'],1700000200000); self.assertEqual(game['name'],''); self.assertEqual(game['appId'],'')
+                self.assertFalse(game['iconAvailable']); self.assertEqual(game['cacheLabel'],'12345.wxapkg')
+                with self.assertRaises(FileNotFoundError): service.icon_file(game['id'])
+            finally: service.close()
+
+    def test_legacy_phone_file_manifest_preserves_mtime_and_160_character_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'phone.zip'
+            name='自'*160
+            metadata={'platform':'wechat','name':name,'nameSource':'manual','source':'phone-cache','scannedAt':1800000000000}
+            manifest={'schema':1,'mode':'raw','game':metadata,'files':[
+                {'path':'payload/cache/main.wxapkg','originalPath':'pkg/general/main.wxapkg','bytes':7,'modifiedSeconds':1700000000},
+                {'path':'payload/cache/resources.bin','originalPath':'pkg/general/resources.bin','bytes':7,'modifiedSeconds':1700000200}]}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps(manifest)); archive.writestr('payload/cache/main.wxapkg',b'fixture')
+                archive.writestr('payload/cache/resources.bin',b'fixture')
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']; id=game['id']
+                self.assertEqual(game['cacheModifiedAt'],1700000200000)
+                self.assertNotEqual(game['cacheModifiedAt'],metadata['scannedAt'])
+                self.assertEqual(game['name'],name); self.assertEqual(game['nameSource'],'manual')
+                self.assertEqual(service.metadata(id,{'name':name})['name'],name)
+                service._refresh(id); self.assertEqual(service.get_game(id)['game']['name'],name)
+                with self.assertRaises(ValueError): service.metadata(id,{'name':name+'长'})
+                specs={item['name']:item for item in service.tool_specs()}
+                self.assertEqual(specs['devhelper_minigame_import']['inputSchema']['properties']['name']['maxLength'],160)
+                self.assertEqual(specs['devhelper_minigame_rename']['inputSchema']['properties']['name']['maxLength'],160)
+                exported=wait(service,service.export({'gameId':id,'mode':'raw','notify':False}))
+                archive_path=service.export_file(exported['result']['exportId'])
+                restored=wait(service,service.import_archive(archive_path))['result']['game']
+                self.assertEqual(restored['name'],name); self.assertEqual(restored['cacheModifiedAt'],1700000200000)
+            finally: service.close()
+
+    def test_manual_icon_rejects_fake_svg_oversized_images_and_preserves_metadata(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'source.zip'
+            with zipfile.ZipFile(source,'w') as archive: archive.writestr('fixture.bin',b'fixture')
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']; id=game['id']
+                wide=io.BytesIO(); Image.new('RGB',(2049,1)).save(wide,format='PNG')
+                for invalid in (b'<svg xmlns="http://www.w3.org/2000/svg"/>',b'\x89PNG\r\n\x1a\ninvalid',b'x'*(2*1024*1024+1),wide.getvalue()):
+                    with self.assertRaises(ValueError): service.metadata_icon(id,invalid)
+                self.assertEqual(service.get_game(id)['game'],game)
+                valid=io.BytesIO(); Image.new('RGB',(8,8),'green').save(valid,format='WEBP')
+                changed=service.metadata_icon(id,valid.getvalue())
+                self.assertEqual(changed['appId'],''); self.assertEqual(changed['name'],'')
+                self.assertTrue(changed['iconAvailable']); self.assertEqual(changed['iconSource'],'manual')
+            finally: service.close()
+
+    def test_imported_icon_path_is_explicit_and_cannot_escape_or_claim_svg(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'source.zip'
+            try:
+                for icon_path in ('../outside.png','metadata/icon.svg','metadata/fake.png'):
+                    with zipfile.ZipFile(source,'w') as archive:
+                        archive.writestr('manifest.json',json.dumps({'game':{'platform':'wechat','iconAvailable':True,'iconArchivePath':icon_path,'iconSource':'manual'}}))
+                        archive.writestr('fixture.bin',b'fixture')
+                        archive.writestr('metadata/icon.svg','<svg/>'); archive.writestr('metadata/fake.png',b'\x89PNG\r\n\x1a\ninvalid')
+                    imported=wait(service,service.import_archive(source)); self.assertEqual(imported['state'],'completed',imported)
+                    game=imported['result']['game']; self.assertFalse(game['iconAvailable'])
+                    with self.assertRaises(FileNotFoundError): service.icon_file(game['id'])
+            finally: service.close()
+
     def test_partial_unity_export_keeps_output_and_reports_failed_collections(self):
         class PartialAdapter:
             def export(self,input_paths,output_dir,variant,**options):

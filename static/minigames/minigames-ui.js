@@ -37,6 +37,20 @@ function size(value) { const bytes = Number(value); if (!Number.isFinite(bytes) 
 function platformName(value) { return ({ douyin: '抖音', wechat: '微信' })[value] || '来源未确认'; }
 function gameName(game) { return String(game?.name || '').trim() || game?.appId || game?.cacheLabel || '名称待补充'; }
 function gameTypeName(game) { return ({ game: '小游戏', miniprogram: '小程序' })[game?.gameType] || '类型待确认'; }
+function cacheTime(game) { const value = game?.cacheModifiedAt; return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 8640000000000000 ? value : 0; }
+function dateTime(value) { const stamp = Number(value); if (!Number.isFinite(stamp) || stamp <= 0 || stamp > 8640000000000000) return '未知'; return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(stamp)); }
+function associationSource(value) { if (value === 'manual') return '手动设置'; if (String(value || '').startsWith('wechat-')) return '微信缓存元信息'; if (value === 'package-metadata') return '包内元信息'; if (value === 'imported-metadata') return '导入包的关联信息'; return value ? '缓存元信息' : '未确认'; }
+function gameIcon(game, large = false) {
+  const holder = node('span', 'game-icon' + (large ? ' large' : '')), fallback = node('span', 'icon-placeholder', '▧'); fallback.setAttribute('aria-hidden', 'true'); holder.append(fallback);
+  holder.title = game?.iconAvailable === true ? '已关联的小游戏图标' : '未找到可靠的图标关联';
+  if (game?.iconAvailable === true && game?.id) {
+    const image = node('img'); image.alt = ''; image.loading = large ? 'eager' : 'lazy'; image.decoding = 'async';
+    const version = game.iconUpdatedAt || game.updatedAt || game.scannedAt;
+    image.src = API_ROOT + '/minigames/games/' + encodeURIComponent(game.id) + '/icon' + (version ? '?v=' + encodeURIComponent(version) : '');
+    image.addEventListener('load', () => { fallback.hidden = true; }); image.addEventListener('error', () => { image.remove(); fallback.hidden = false; holder.title = '图标暂时无法读取'; }); holder.append(image);
+  }
+  return holder;
+}
 function engineName(game, compact = false) {
   const value = String(game?.engine || '').toLowerCase(), variant = String(game?.engineVariant || '').toLowerCase();
   if (['unity', 'tuanjie', '团结'].includes(value)) {
@@ -58,11 +72,13 @@ function archiveUrl(value, root = API_ROOT) { return root + '/minigames/exports/
 function renderGames() {
   const search = $('search').value.trim().toLowerCase();
   const games = ui.games.filter(game => !search || [game.name, game.appId, game.cacheLabel, game.id].some(value => String(value || '').toLowerCase().includes(search)));
+  games.sort((a, b) => { const left = cacheTime(a), right = cacheTime(b); if (!left || !right) { if (left || right) return left ? -1 : 1; } else if (left !== right) return $('sort').value === 'earliest' ? left - right : right - left; return String(a.id).localeCompare(String(b.id)); });
   const list = $('game-list'); list.replaceChildren();
   for (const game of games) {
     const row = button('', () => selectGame(game), 'game-row'); row.setAttribute('aria-pressed', String(ui.selected?.id === game.id));
-    row.append(node('strong', '', gameName(game)), node('div', 'identifier', game.appId || 'AppID 待确认'));
-    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', gameTypeName(game)), node('span', '', size(game.bytes)), node('span', 'engine-label', engineName(game, true))); row.append(meta); list.append(row);
+    const heading = node('div', 'game-row-heading'), identity = node('div', 'game-row-identity'); identity.append(node('strong', '', gameName(game)), node('div', 'identifier', game.appId || 'AppID 待确认')); heading.append(gameIcon(game), identity); row.append(heading);
+    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', gameTypeName(game)), node('span', '', size(game.bytes)), node('span', 'engine-label', engineName(game, true)));
+    const time = node('time', 'cache-time', cacheTime(game) ? '缓存修改 · ' + dateTime(cacheTime(game)) : '缓存修改时间未知'); if (cacheTime(game)) time.dateTime = new Date(cacheTime(game)).toISOString(); time.title = '缓存文件的修改时间，不代表最后游玩时间。'; row.append(meta, time); list.append(row);
   }
   $('game-count').textContent = (Number.isFinite(ui.total) ? ui.total : ui.games.length) + ' 个';
   $('library-empty').hidden = games.length > 0;
@@ -72,7 +88,7 @@ function renderGames() {
 async function refreshGames(preferredId) {
   const request = ++ui.listRequest; $('refresh').disabled = true; $('game-count').textContent = '读取中';
   try {
-    const query = new URLSearchParams({ platform: $('platform').value, offset: String(ui.offset), limit: String(ui.limit) });
+    const query = new URLSearchParams({ platform: $('platform').value, offset: String(ui.offset), limit: String(ui.limit), sort: $('sort').value });
     const data = await api('/minigames/games?' + query); if (request !== ui.listRequest) return;
     const values = data.games || data.items; if (!Array.isArray(values)) throw new Error('游戏列表格式不正确。');
     ui.games = values.filter(game => game && typeof game.id === 'string'); ui.total = Number.isFinite(Number(data.total)) ? Number(data.total) : ui.games.length;
@@ -85,7 +101,9 @@ async function refreshGames(preferredId) {
 }
 function facts(game) {
   const source = typeof game.source === 'string' ? ({ imported: '导入的游戏包', cache: '设备缓存', 'android-cache': '手机缓存', desktop: '电脑资料' })[game.source] || game.source : game.source?.label || (DEVICE === 'android' ? '手机缓存' : '电脑资料');
-  const values = [['平台', platformName(game.platform)], ['缓存类型', gameTypeName(game)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['缓存包', (Number(game.packageCount) || 0) + ' 个'], ['总大小', size(game.bytes)], ['资料来源', source]];
+  const values = [['平台', platformName(game.platform)], ['缓存类型', gameTypeName(game)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['缓存包', (Number(game.packageCount) || 0) + ' 个'], ['总大小', size(game.bytes)], ['缓存修改时间', dateTime(cacheTime(game))], ['名称来源', game.name ? associationSource(game.nameSource || game.metadataSource) : '尚未确认名称'], ['图标关联', game.iconAvailable === true ? associationSource(game.iconSource || game.metadataSource) : '未找到可靠关联'], ['资料来源', source]];
+  if (game.source === 'imported' && game.createdAt) values.push(['导入电脑时间', dateTime(game.createdAt)]);
+  if (game.scannedAt) values.push(['DevHelper 扫描时间', dateTime(game.scannedAt)]);
   const list = $('game-facts'); list.replaceChildren(); for (const [label, value] of values) { const item = node('div'); item.append(node('dt', '', label), node('dd', '', value)); list.append(item); }
 }
 function availableModes(game) { game = game || {}; const modes = Array.isArray(game.exportModes) ? game.exportModes.map(value => typeof value === 'string' ? value : value.id || value.mode) : ['raw']; const engine = String(game.engine || '').toLowerCase(); const unityPossible = DEVICE !== 'android' && ['', 'unknown', 'unity', 'tuanjie', '团结'].includes(engine); return [...new Set(['raw', ...modes.filter(value => value !== 'raw' && MODES[value] && (value !== 'unity-project' || unityPossible))])]; }
@@ -98,7 +116,7 @@ function renderModes() {
   $('start-export').disabled = !ui.selected || ui.busy; $('start-export').textContent = '导出' + MODES[ui.mode][0];
 }
 function renderDetail(game) {
-  $('detail-empty').hidden = true; $('detail-content').hidden = false; $('game-name').textContent = gameName(game); $('game-id').textContent = 'AppID：' + (game.appId || '缓存中未提供');
+  $('detail-empty').hidden = true; $('detail-content').hidden = false; $('game-name').textContent = gameName(game); $('game-id').textContent = 'AppID：' + (game.appId || '缓存中未提供'); $('game-icon').replaceChildren(gameIcon(game, true));
   const label = engineName(game); $('engine-badge').textContent = label; $('engine-badge').classList.toggle('unknown', label === '未识别引擎'); facts(game);
   if (document.activeElement !== $('name-input')) $('name-input').value = ui.nameDrafts.has(game.id) ? ui.nameDrafts.get(game.id) : game.name || '';
   const issues = [...(Array.isArray(game.issues) ? game.issues : []), ...(Array.isArray(game.gameTypeIssues) ? game.gameTypeIssues : []), ...(Array.isArray(game.metadataIssues) ? game.metadataIssues : [])]; $('game-issues').replaceChildren(); $('game-issues').hidden = !issues.length; for (const issue of issues) $('game-issues').append(node('p', '', typeof issue === 'string' ? issue : issue.message || issue.code || '缓存内容不完整。'));
@@ -120,6 +138,19 @@ async function selectGame(game, quiet = false) {
 async function saveName(event) {
   event.preventDefault(); if (!ui.selected) return; const selectedId = ui.selected.id, draft = $('name-input').value, name = draft.trim();
   await busy($('save-name'), async () => { const data = await api('/minigames/games/' + encodeURIComponent(selectedId) + '/metadata', { name }); if (ui.nameDrafts.get(selectedId) === draft) ui.nameDrafts.delete(selectedId); if (ui.selected?.id === selectedId) { ui.selected = { ...ui.selected, ...(data.game || data), name }; renderDetail(ui.selected); } const game = ui.games.find(game => game.id === selectedId); if (game) game.name = name; renderGames(); toast('游戏名称已保存。'); });
+}
+async function saveIcon(file) {
+  if (!file || !ui.selected) return; if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('图标须为不超过 2 MiB 的 PNG、JPEG 或 WebP 图片。');
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) && !/\.(png|jpe?g|webp)$/i.test(file.name)) throw new Error('请选择 PNG、JPEG 或 WebP 图片。');
+  const id = ui.selected.id, controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45000);
+  try {
+    const response = await fetch(API_ROOT + '/minigames/games/' + encodeURIComponent(id) + '/icon', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type || 'application/octet-stream', Accept: 'application/json' }, body: file, signal: controller.signal });
+    const raw = await response.text(); let data; try { data = JSON.parse(raw); } catch { throw new Error('图标保存结果格式不正确。'); }
+    if (!response.ok) throw new Error(errorText(data, response.status)); const game = data.game || data;
+    if (ui.selected?.id === id) { ui.selected = { ...ui.selected, ...game }; renderDetail(ui.selected); }
+    const row = ui.games.find(value => value.id === id); if (row) Object.assign(row, game); renderGames(); toast('图标已手动关联到此缓存。');
+  } catch (error) { if (error.name === 'AbortError') throw new Error('图标保存超时，请检查设备连接后刷新确认。'); throw error; }
+  finally { clearTimeout(timer); }
 }
 
 function exportActions(value, root = API_ROOT, game = ui.selected) {
@@ -258,7 +289,7 @@ async function uploadAttachment(file, root) {
 async function importZip(file) {
   if (!file || ui.busy) return; if (!/\.zip$/i.test(file.name)) throw new Error('请选择 ZIP 文件。'); ui.busy = true; $('choose-zip').disabled = true; renderModes();
   const root = DEVICE === 'android' && API_ROOT.startsWith('/device-api/') ? MAC_API : API_ROOT;
-  try { message('正在上传 ' + file.name + ' 到电脑…'); const attachment = await uploadAttachment(file, root); const data = await api('/minigames/import', { attachmentId: attachment.id, platform: $('platform').value === 'all' ? 'unknown' : $('platform').value, name: file.name.replace(/\.zip$/i, '') }, root); addJob(data, { title: '电脑导入 ' + file.name, apiRoot: root }); message('ZIP 已保存到电脑，正在识别游戏包。'); }
+  try { message('正在上传 ' + file.name + ' 到电脑…'); const attachment = await uploadAttachment(file, root); const data = await api('/minigames/import', { attachmentId: attachment.id, platform: $('platform').value === 'all' ? 'unknown' : $('platform').value }, root); addJob(data, { title: '电脑导入 ' + file.name, apiRoot: root }); message('ZIP 已保存到电脑，正在识别游戏包。'); }
   finally { ui.busy = false; $('choose-zip').disabled = false; renderModes(); }
 }
 async function transferToMac(value, root, game) {
@@ -269,7 +300,7 @@ async function transferToMac(value, root, game) {
     const response = await fetch(archiveUrl(value, root), { credentials: 'same-origin', signal: controller.signal }); if (!response.ok) throw new Error('手机' + packageName + '下载失败（HTTP ' + response.status + '）。'); const blob = await response.blob();
     task.message = '正在保存到这台电脑的附件库…'; renderTasks(); const file = new File([blob], (value.name || game?.name || '小游戏' + packageName).replace(/\.zip$/i, '') + '.zip', { type: 'application/zip' }); const attachment = await uploadAttachment(file, MAC_API);
     task.message = packageName + '已到电脑，正在导入游戏列表…'; renderTasks();
-    const data = await api('/minigames/import', { attachmentId: attachment.id, platform: ['douyin', 'wechat'].includes(game?.platform) ? game.platform : 'unknown', name: game?.name || value.name || '' }, MAC_API);
+    const data = await api('/minigames/import', { attachmentId: attachment.id, platform: ['douyin', 'wechat'].includes(game?.platform) ? game.platform : 'unknown' }, MAC_API);
     task.state = 'completed'; task.progress = 100; task.message = packageName + '已下载到电脑。导入完成后，点击“在电脑查看”选择资源导出。'; renderTasks(); addJob(data, { title: '电脑导入小游戏', apiRoot: MAC_API }); toast(packageName + '已到电脑，正在导入。');
   } catch (error) { task.state = 'failed'; task.error = error.name === 'AbortError' ? '下载超时，请检查手机连接后重试。' : error.message; renderTasks(); throw error; }
   finally { clearTimeout(timer); }
@@ -301,10 +332,12 @@ function renderToolConfig() {
 }
 
 $('search').addEventListener('input', renderGames); $('refresh').addEventListener('click', () => { refreshGames(); restoreServerJobs(); }); $('platform').addEventListener('change', () => { ui.offset = 0; message(''); refreshGames(); });
+$('sort').addEventListener('change', () => { ui.offset = 0; message(''); refreshGames(); });
 $('name-input').addEventListener('input', () => { if (!ui.selected) return; if ($('name-input').value === (ui.selected.name || '')) ui.nameDrafts.delete(ui.selected.id); else ui.nameDrafts.set(ui.selected.id, $('name-input').value); });
 $('previous').addEventListener('click', () => { ui.offset = Math.max(0, ui.offset - ui.limit); refreshGames(); }); $('next').addEventListener('click', () => { ui.offset += ui.limit; refreshGames(); });
 $('scan').addEventListener('click', () => busy($('scan'), startScan)); $('name-form').addEventListener('submit', saveName); $('start-export').addEventListener('click', startExport);
 $('choose-zip').addEventListener('click', () => $('zip-input').click()); $('zip-input').addEventListener('change', () => { const file = $('zip-input').files?.[0]; $('zip-input').value = ''; importZip(file).catch(error => message(error.message, true)); });
+$('choose-icon').addEventListener('click', () => $('icon-input').click()); $('icon-input').addEventListener('change', () => { const file = $('icon-input').files?.[0]; $('icon-input').value = ''; busy($('choose-icon'), () => saveIcon(file)); });
 $('assetripper-check').addEventListener('click', () => busy($('assetripper-check'), checkAssetRipper)); $('assetripper').addEventListener('toggle', () => { if ($('assetripper').open && !ui.tool) checkAssetRipper(); });
 window.addEventListener('message', event => { if (event.origin !== window.location.origin || event.source !== window.parent || event.data?.type !== 'devhelper.minigames-visibility') return; ui.visible = event.data.visible === true; if (ui.visible) schedulePoll(100); else clearTimeout(ui.timer); });
 document.addEventListener('visibilitychange', () => { if (active()) schedulePoll(100); else clearTimeout(ui.timer); }); window.addEventListener('pagehide', () => clearTimeout(ui.timer));
