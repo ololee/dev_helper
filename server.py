@@ -40,7 +40,7 @@ from web_assets import asset_path
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.6.2"
+VERSION = "2.6.3"
 
 
 def tool_result(value):

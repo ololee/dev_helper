@@ -132,7 +132,7 @@ function all(element){return [element,...element.children.flatMap(all)];}
 const state={recording:{state:'idle'},recordingOwnerId:null,recordingSeen:new Set(),recordTarget:2,recordStartedAt:0};
 let inserts=0;const attachment=value=>value;const insertAudio=()=>inserts++;
 const loadAudio=()=>{};const renderRecording=()=>{};const toast=()=>{};const message=()=>{};const errorText=()=>'';
-""" + self.function('applyRecording') + """
+""" + self.function('recordingValue') + '\n' + self.function('applyRecording') + """
 applyRecording({state:'saved',recordingId:'old-recording',attachment:{id:'old-audio'}});
 if(inserts!==0||state.recordTarget!==2)process.exit(1);
 applyRecording({state:'recording',recordingId:'owned-recording',elapsedMillis:0},true);
@@ -149,6 +149,131 @@ const message=()=>{};
 (async()=>{const pending=loadRecording();state.recordingGeneration++;
 complete({state:'saved',recordingId:'old-recording'});await pending;
 if(applied!==0)process.exit(1);})();
+""")
+
+    def recording_program(self, origin='mac'):
+        """Synthetic permission/MediaRecorder/timers; never opens a microphone."""
+        functions=('recordingValue','recordingClock','recordingVisible','clearRecordingTimer',
+                   'releaseBrowserRecording','finishRecordingCancellation',
+                   'requestRecordingCancellation','cancelRecordingCountdown','tickRecordingSession',
+                   'applyRecording','renderRecording','loadRecording','browserRecordingError',
+                   'startRecording','stopRecording','handleNativeRecordingResult','recordingPageHidden')
+        return 'const ORIGIN='+json.dumps(origin)+";const API='/owned';\n"+r"""
+const assert=require('node:assert/strict');
+const state={tab:'recordings',note:null,noteKey:1,recording:{state:'idle',elapsedMillis:0},recordBusy:false,recordTarget:null,recordingGeneration:0,recordSession:null,recordStatusPending:false,recordingOwnerId:null,recordingSeen:new Set(),recordStartedAt:0,recorder:null,stream:null,chunks:[],pendingBlob:null,uploading:false};
+const elements={},$=id=>elements[id]||(elements[id]={value:'',textContent:'',classList:{toggle(){}},removeAttribute(){}});
+let clock=0,nextTimer=1,starts=0,saves=0,stopTracks=0,visibleFrame=true,nativeEnabled=false,permissionResolve;
+const timers=new Map(),messages=[],sent=[];
+function setTimeout(fn,delay){const id=nextTimer++;timers.set(id,{fn,due:clock+delay});return id;}
+function clearTimeout(id){timers.delete(id);}
+function advance(ms){const target=clock+ms;for(;;){const next=[...timers].filter(([,t])=>t.due<=target).sort((a,b)=>a[1].due-b[1].due)[0];if(!next)break;clock=next[1].due;timers.delete(next[0]);next[1].fn();}clock=target;}
+const performance={now:()=>clock},document={hidden:false},window={isSecureContext:true,frameElement:{getClientRects:()=>visibleFrame?[{}]:[]},DevHelperMotion:{enter(){}}};
+const stream=()=>({getTracks:()=>[{stop(){stopTracks++;}}]});
+Object.defineProperty(globalThis,'navigator',{value:{mediaDevices:{getUserMedia:()=>new Promise(resolve=>permissionResolve=resolve)}},configurable:true});
+class MediaRecorder{static isTypeSupported(){return true;}constructor(stream,options){this.stream=stream;this.mimeType=options?.mimeType||'audio/webm';this.state='inactive';}start(){starts++;this.state='recording';}stop(){this.state='inactive';this.onstop?.();}}
+const native=()=>nativeEnabled,message=(id,value)=>messages.push(value),errorText=()=>'',attachment=value=>value,insertAudio=()=>true,toast=()=>{},loadAudio=()=>{};
+let api=async(method,path,body)=>{sent.push({method,path,body});return {state:'cancelled'};};
+async function saveBrowserRecording(){assert.ok(state.pendingBlob.size>0);saves++;state.pendingBlob=null;applyRecording({state:'saved',attachment:{id:'synthetic-'+saves}},true);}
+"""+'\n'.join(self.function(name) for name in functions)+'\n'
+
+    def test_browser_counts_three_seconds_before_start_and_only_saves_real_audio(self):
+        self.node(self.recording_program()+"""
+(async()=>{const pending=startRecording();assert.equal(state.recording.state,'starting');assert.equal(starts,0);
+permissionResolve(stream());await pending;assert.equal(state.recording.state,'countdown');assert.equal($('record-circle').textContent,'3');assert.equal($('record-stop').textContent,'取消倒计时');
+advance(999);assert.equal(starts,0);assert.equal($('record-circle').textContent,'3');advance(1);assert.equal($('record-circle').textContent,'2');
+advance(1000);assert.equal($('record-circle').textContent,'1');advance(999);assert.equal(starts,0);advance(1);assert.equal(starts,1);assert.equal(state.recording.state,'recording');assert.equal($('record-stop').textContent,'停止并保存');
+state.recorder.ondataavailable({data:new Blob(['synthetic pcm'])});await stopRecording();assert.equal(saves,1);assert.equal(stopTracks,1);assert.equal(state.recording.state,'saved');
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_browser_countdown_cancel_releases_stream_and_produces_no_attachment(self):
+        self.node(self.recording_program()+"""
+(async()=>{const pending=startRecording();permissionResolve(stream());await pending;advance(1000);await stopRecording();
+assert.equal(state.recording.state,'cancelled');assert.equal(stopTracks,1);assert.equal(state.pendingBlob,null);assert.equal(state.recordSession,null);
+advance(10000);assert.equal(starts,0);assert.equal(saves,0);assert.equal(timers.size,0);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_late_permission_after_cancel_cannot_start_or_replace_new_session(self):
+        self.node(self.recording_program()+"""
+(async()=>{const first=startRecording(),resolveFirst=permissionResolve;cancelRecordingCountdown();
+const second=startRecording(),resolveSecond=permissionResolve,newSession=state.recordSession;
+resolveFirst(stream());await first;assert.equal(stopTracks,1);assert.equal(state.recordSession,newSession);assert.equal(state.recording.state,'starting');assert.equal(state.recordBusy,true);
+resolveSecond(stream());await second;advance(3000);assert.equal(starts,1);assert.equal(saves,0);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_background_hidden_iframe_and_leaving_cancel_pending_browser_start(self):
+        for transition in ("document.hidden=true;recordingPageHidden();",
+                           "visibleFrame=false;advance(100);",
+                           "state.tab='notes';advance(100);",
+                           "recordingPageHidden(true);"):
+            self.node(self.recording_program()+"""
+(async()=>{const pending=startRecording();permissionResolve(stream());await pending;advance(1500);
+"""+transition+"""
+advance(5000);assert.equal(starts,0);assert.equal(saves,0);assert.equal(stopTracks,1);assert.equal(state.recordSession,null);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_permission_denial_or_empty_recording_does_not_upload(self):
+        self.node(self.recording_program()+"""
+(async()=>{navigator.mediaDevices.getUserMedia=async()=>{throw Object.assign(Error('denied'),{name:'NotAllowedError'});};await startRecording();assert.equal(state.recording.state,'failed');assert.equal(timers.size,0);assert.equal(starts,0);
+navigator.mediaDevices.getUserMedia=async()=>stream();await startRecording();advance(3000);assert.equal(starts,1);await stopRecording();assert.equal(saves,0);assert.equal(state.pendingBlob,null);assert.equal(state.recording.state,'failed');assert.equal(stopTracks,1);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_background_permission_result_and_page_exit_discard_owned_resources(self):
+        self.node(self.recording_program()+"""
+(async()=>{const pending=startRecording();document.hidden=true;recordingPageHidden();permissionResolve(stream());await pending;
+advance(5000);assert.equal(starts,0);assert.equal(stopTracks,1);assert.equal(saves,0);
+document.hidden=false;navigator.mediaDevices.getUserMedia=async()=>stream();await startRecording();advance(3000);assert.equal(starts,1);
+state.recorder.ondataavailable({data:new Blob(['synthetic'])});recordingPageHidden(true);assert.equal(stopTracks,2);assert.equal(state.pendingBlob,null);assert.equal(state.recordSession,null);assert.equal(saves,0);assert.equal(timers.size,0);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_phone_start_has_one_backend_countdown_and_cancel_is_guarded_by_owner(self):
+        self.node(self.recording_program('android')+"""
+(async()=>{let resolveStart;api=(method,path,body)=>{sent.push({method,path,body});return path==='/recording/start'?new Promise(resolve=>resolveStart=resolve):Promise.resolve({state:'cancelled',recordingId:'owned'});};
+const pending=startRecording();await stopRecording();assert.equal(sent.length,1);resolveStart({state:'countdown',recordingId:'owned',countdownRemaining:3});await pending;
+assert.deepEqual(sent[1].body,{recordingId:'owned',cancelCountdown:true});assert.equal(state.recording.state,'cancelled');assert.equal(starts,0);assert.equal(saves,0);
+api=async(method,path,body)=>{sent.push({method,path,body});return {state:'countdown',recordingId:'new-owned',countdownRemaining:3};};await startRecording();assert.equal(state.recording.state,'countdown');assert.equal(state.recordSession.deadline,undefined);
+applyRecording({state:'recording',recordingId:'new-owned',elapsedMillis:0});assert.equal(state.recording.state,'recording');assert.equal(timers.size,0);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_native_pending_permission_cancel_and_late_start_are_owned(self):
+        self.node(self.recording_program('android')+"""
+(async()=>{nativeEnabled=true;const cancelled=[];window.NativeKnowledge={startAudioRecording(){},cancelAudioRecordingCountdown(id){cancelled.push(id);},stopAudioRecording(){throw Error('normal stop cannot cancel a countdown');}};
+await startRecording();assert.equal(state.recording.state,'starting');cancelRecordingCountdown();assert.deepEqual(cancelled,['']);
+handleNativeRecordingResult({status:200,body:{state:'countdown',recordingId:'owned-late',countdownRemaining:3}});assert.deepEqual(cancelled,['','owned-late']);
+handleNativeRecordingResult({status:200,body:{state:'cancelled',recordingId:'owned-late'}});assert.equal(state.recordSession,null);assert.equal(state.recordBusy,false);assert.equal(starts,0);assert.equal(saves,0);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_cancellation_race_keeps_started_recording_and_never_cancels_foreign_id(self):
+        self.node(self.recording_program('android')+"""
+const own={kind:'remote',recordingId:'owned',cancelled:true};state.recordSession=own;state.recordBusy=true;
+finishRecordingCancellation(own,{state:'recording',recordingId:'owned',elapsedMillis:10});assert.equal(state.recording.state,'recording');assert.equal(own.cancelled,false);assert.equal(state.recordBusy,false);
+own.cancelled=true;finishRecordingCancellation(own,{state:'countdown',recordingId:'foreign',countdownRemaining:3});assert.equal(state.recordSession,null);assert.equal(own.recordingId,'owned');assert.equal(sent.length,0);
+""")
+
+    def test_phone_stop_uses_displayed_recording_id_for_http_and_native(self):
+        self.node(self.recording_program('android')+"""
+(async()=>{const id='11111111-2222-4333-8444-555555555555';state.recording={state:'recording',recordingId:id};
+api=async(method,path,body)=>{sent.push({method,path,body});return {state:'saved',recordingId:id};};await stopRecording();
+assert.deepEqual(sent[0],{method:'POST',path:'/recording/stop',body:{recordingId:id}});assert.equal(state.recordBusy,false);
+nativeEnabled=true;const stopped=[];window.NativeKnowledge={stopAudioRecording(){throw Error('global stop must not be used');},stopAudioRecordingById(value){stopped.push(value);}};
+state.recording={state:'recording',recordingId:id};await stopRecording();assert.deepEqual(stopped,[id]);assert.equal(state.recordBusy,true);
+handleNativeRecordingResult({status:200,body:{state:'saved',recordingId:id}});assert.equal(state.recordBusy,false);
+delete window.NativeKnowledge.stopAudioRecordingById;state.recording={state:'recording',recordingId:id};await stopRecording();assert.deepEqual(sent[1].body,{recordingId:id});assert.equal(state.recordBusy,false);
+})().catch(error=>{console.error(error);process.exit(1);});
+""")
+
+    def test_phone_stop_without_id_refreshes_and_never_calls_global_stop(self):
+        self.node(self.recording_program('android')+"""
+(async()=>{state.recording={state:'recording'};api=async(method,path,body)=>{sent.push({method,path,body});return {state:'recording',recordingId:'owned'};};
+await stopRecording();assert.equal(sent.length,1);assert.equal(sent[0].method,'GET');assert.equal(sent[0].path,'/recording/status');assert.ok(messages.some(value=>value.includes('录音标识')));
+})().catch(error=>{console.error(error);process.exit(1);});
 """)
 
     def test_scoped_audio_references_and_unsafe_preview_links(self):

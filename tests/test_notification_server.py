@@ -2,16 +2,23 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_server as server_tests
 from notifications import BASE
 from relay_client import RelayPending
+from sync import KnowledgeSync
 
 
 class NotificationServerTests(unittest.TestCase):
-    setUp = server_tests.ServerTests.setUp
+    def setUp(self):
+        # A fresh store starts recovery in the lifespan even with auto-sync off.
+        # Keep that unrelated watcher from consuming notification routing mocks.
+        sync_start = patch.object(KnowledgeSync, 'start')
+        sync_start.start()
+        self.addCleanup(sync_start.stop)
+        server_tests.ServerTests.setUp(self)
     tearDown = server_tests.ServerTests.tearDown
     rpc = server_tests.ServerTests.rpc
 
