@@ -11,17 +11,20 @@ import mimetypes
 import os
 from pathlib import Path
 import shutil
+import struct
 import threading
 import time
 from urllib.parse import quote, unquote, urlsplit
 import uuid
 import zipfile
 
-from minigame_formats import ASSET_EXT, MAX_EXPANDED, FormatError, check_cancel, inspect_tree, safe_path, unpack_package, unpack_zip
+from minigame_formats import ASSET_EXT, MAX_EXPANDED, WEB_DATA_SIGNATURES, FormatError, check_cancel, inspect_tree, safe_path, unpack_package, unpack_web_data, unpack_zip, web_data_entries
 
 BASE='/api/knowledge/minigames'
 ICON_LIMIT=2*1024*1024
 ICON_SUFFIXES=('.png','.jpg','.webp','.gif')
+PACKAGE_EXT={'.pkg','.wxapkg','.ttpkg'}
+CACHE_ASSOCIATIONS={'none','scoped-appid','scoped-directory','unassociated','version-unconfirmed'}
 
 
 def now(): return int(time.time()*1000)
@@ -42,7 +45,8 @@ def cache_modified_at(metadata):
     return max(stamps,default=0)
 
 
-def source_metadata(root):
+def source_manifest(root):
+    selected=None
     for name in ('devhelper-export.json','manifest.json'):
         path=root/name
         if not path.is_file() or path.stat().st_size>16*1024**2: continue
@@ -50,15 +54,22 @@ def source_metadata(root):
             value=json.loads(path.read_text('utf-8'))
             game=value.get('game') if isinstance(value,dict) else None
             if isinstance(game,dict):
-                game=dict(game)
-                if not cache_modified_at(game):
-                    # Old phone raw archives stored the original stat in the
-                    # file manifest while game.source remained "phone-cache".
-                    stamp=cache_modified_at({'source':value.get('files')})
-                    if stamp: game['cacheModifiedAt']=stamp
-                return game
+                if selected is None: selected={**value,'game':dict(game)}
+                elif not isinstance(selected.get('files'),list) and isinstance(value.get('files'),list):
+                    # Desktop raw exports keep the phone file-role manifest.
+                    # Prefer the latest game metadata, retaining original roles.
+                    selected['files']=value['files']
         except (ValueError,UnicodeError,OSError): pass
-    return {}
+    if selected is None: return {}
+    if not cache_modified_at(selected['game']):
+        # Old phone raw archives stored source timestamps on files while
+        # game.source remained "phone-cache"; export/import dates are unrelated.
+        stamp=cache_modified_at({'source':selected.get('files')})
+        if stamp: selected['game']['cacheModifiedAt']=stamp
+    return selected
+
+
+def source_metadata(root): return source_manifest(root).get('game',{})
 
 
 def metadata_text(value,limit):
@@ -116,13 +127,86 @@ def files(root):
     return sorted(p for p in root.rglob('*') if p.is_file() and not p.is_symlink())
 
 
+def asset_signature(path):
+    """Bounded file signatures also recognize hashed, extensionless downloads."""
+    with path.open('rb') as source: header=source.read(128)
+    if header.startswith((b'UnityFS\0',b'UnityRaw\0',b'UnityWeb\0',*WEB_DATA_SIGNATURES)): return 'unity'
+    if len(header)>=20:
+        metadata_size,total_size,version,offset=struct.unpack_from('>4I',header)
+        version_offset=20
+        if version>=22 and len(header)>=48:
+            metadata_size,total_size,offset=struct.unpack_from('>IQQ',header,20); version_offset=48
+        if (9<=version<=30 and total_size==path.stat().st_size and 0<metadata_size<total_size
+                and version_offset<offset<=total_size):
+            import re
+            if re.match(rb'\d{1,4}\.\d+\.\d+[ft]\d+\x00',header[version_offset:version_offset+64]): return 'unity'
+    if header.startswith((b'\x89PNG\r\n\x1a\n',b'\xff\xd8\xff',b'GIF87a',b'GIF89a',b'\xabKTX 11\xbb\r\n\x1a\n',b'\xabKTX 20\xbb\r\n\x1a\n',b'\x13\xab\xa1\x5c',b'PVR\x03',b'DDS ')): return 'image'
+    if header.startswith(b'RIFF') and header[8:12]==b'WEBP': return 'image'
+    if header.startswith(b'RIFF') and header[8:12]==b'WAVE': return 'audio'
+    if header.startswith((b'OggS',b'fLaC',b'ID3')): return 'audio'
+    if header.startswith(b'\x1a\x45\xdf\xa3'): return 'video'
+    if len(header)>=16 and header[4:8]==b'ftyp': return 'audio' if header[8:12] in (b'M4A ',b'M4B ',b'M4P ') else 'video'
+    return ''
+
+
+def original_package(path,kind=''):
+    if asset_signature(path) or kind=='cache': return False
+    if path.suffix.lower() in PACKAGE_EXT: return True
+    with path.open('rb') as source: header=source.read(14)
+    return header.startswith((b'TPKG',b'V1MMWX')) or len(header)==14 and header[0]==0xbe and header[13]==0xed
+
+
+def payload_files(root,metadata=None):
+    metadata=metadata or source_metadata(root)
+    excluded={'manifest.json','devhelper-export.json','metadata/app-icon.png','metadata/app-icon.jpg','metadata/app-icon.webp','metadata/app-icon.gif'}
+    icon=metadata.get('iconArchivePath')
+    if isinstance(icon,str):
+        try: excluded.add(safe_path(icon))
+        except (ValueError,FormatError): pass
+    return [path for path in files(root) if path.relative_to(root).as_posix() not in excluded]
+
+
+def source_roles(root):
+    manifest=source_manifest(root)
+    kinds={}
+    for item in manifest.get('files',[]) if isinstance(manifest.get('files'),list) else []:
+        if isinstance(item,dict) and isinstance(item.get('path'),str):
+            kind=item.get('kind',item.get('type'))
+            if kind in ('package','cache'): kinds[item['path']]=kind
+    return kinds
+
+
+def inventory(root,metadata=None,app_id=''):
+    manifest=source_manifest(root); metadata=metadata if metadata is not None else manifest.get('game',{})
+    kinds=source_roles(root)
+    rows=payload_files(root,metadata); package_count=package_bytes=cache_count=cache_bytes=0
+    for path in rows:
+        if original_package(path,kinds.get(path.relative_to(root).as_posix(),'')):
+            package_count+=1; package_bytes+=path.stat().st_size
+        else: cache_count+=1; cache_bytes+=path.stat().st_size
+    association=metadata.get('cacheAssociation')
+    if not cache_count: association='none'
+    elif not isinstance(association,str) or association not in CACHE_ASSOCIATIONS or association=='none' or association=='scoped-appid' and not app_id: association='unassociated'
+    result={'packageCount':package_count,'packageBytes':package_bytes,'cacheFileCount':cache_count,'cacheBytes':cache_bytes,
+            'inventoryKind':'mixed' if package_count and cache_count else 'package' if package_count else 'cache',
+            'cacheAssociation':association,'bytes':package_bytes+cache_bytes}
+    mismatches=[key for key in ('packageCount','packageBytes','cacheFileCount','cacheBytes') if key in metadata and metadata[key]!=result[key]]
+    result['inventoryIssues']=[{'code':'inventory_count_mismatch','message':'导入包实际载荷与来源清单的数量或容量不同，显示实际文件统计。'}] if mismatches else []
+    return result
+
+
 def file_kind(path):
     suffix=path.suffix.lower()
     if suffix in {'.png','.jpg','.jpeg','.webp','.gif','.ktx','.pvr','.astc'}: return 'image'
     if suffix in {'.wav','.mp3','.ogg','.m4a'}: return 'audio'
     if suffix in {'.mp4','.webm'}: return 'video'
     if suffix in {'.atlas','.skel'} or path.name.lower().endswith(('.skel.bytes','.atlas.txt')): return 'spine'
-    return 'data'
+    signature=asset_signature(path)
+    return signature if signature and signature!='unity' else 'data'
+
+
+def asset_file(path):
+    return path.suffix.lower() in ASSET_EXT or path.name.lower().endswith(('.atlas.txt','.json.txt','.skel.bytes')) or bool(asset_signature(path))
 
 
 class MiniGameService:
@@ -143,6 +227,17 @@ class MiniGameService:
             except (OSError,ValueError): pass
         for path in self.export_root.glob('.pending-*'): shutil.rmtree(path,ignore_errors=True)
         for path in self.game_root.glob('.pending-*'): shutil.rmtree(path,ignore_errors=True)
+        # Upgrade statistics for already-imported archives without changing
+        # identities, manual names, source time or the immutable input files.
+        for path in self.game_root.glob('*/manifest.json'):
+            try:
+                game=json.loads(path.read_text('utf-8'))
+                if all(key in game for key in ('packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation')): continue
+                source=path.parent/'input'
+                if source.is_dir():
+                    game.update(inventory(source,source_metadata(source),game.get('appId','')))
+                    write_json(path,game)
+            except (OSError,ValueError,TypeError): pass
 
     def close(self):
         self.closed=True
@@ -292,15 +387,17 @@ class MiniGameService:
                 report(message='读取导入包索引'); unpack_zip(pending/'original.zip',pending/'input',event)
                 metadata=source_metadata(pending/'input')
                 analysis=inspect_tree(pending/'input')
-                packages=[p for p in files(pending/'input') if p.suffix.lower() in ('.pkg','.wxapkg','.ttpkg')]
+                payload=payload_files(pending/'input',metadata)
+                packages=[p for p in payload if original_package(p)]
                 game={'id':id,'platform':platform if platform!='unknown' else metadata.get('platform','unknown'),
                       'appId':metadata_text(metadata.get('appId'),100) or analysis['appId'],
                       'name':name.strip() or metadata_text(metadata.get('name'),160) or analysis['name'],
-                      'cacheLabel':packages[0].name if len(packages)==1 else '',
+                      'cacheLabel':packages[0].name if len(packages)==1 else metadata_text(metadata.get('cacheLabel'),200) or (payload[0].name if len(payload)==1 else ''),
                       'version':str(metadata.get('version',''))[:100],'source':'imported','createdAt':now(),'updatedAt':now(),
                       'cacheModifiedAt':cache_modified_at(metadata),'iconAvailable':False,
-                      'issues':[],'packageCount':len(packages),
+                      'issues':[],
                       'exportModes':['raw','unpacked','assets','unity-project'],**{k:v for k,v in analysis.items() if k not in ('appId','name')}}
+                game.update(inventory(pending/'input',metadata,game['appId']))
                 if game['platform'] not in ('douyin','wechat','unknown'): game['platform']='unknown'
                 if not isinstance(game['appId'],str) or len(game['appId'])>100: game['appId']=''
                 if not isinstance(game['name'],str) or len(game['name'])>160: game['name']=''
@@ -341,24 +438,36 @@ class MiniGameService:
                 game['nameSource']=field_source(metadata,'name',game['name'])
             if not cache_modified_at(game): game['cacheModifiedAt']=cache_modified_at(metadata)
             if metadata_text(metadata.get('metadataSource'),150): game['metadataSource']=metadata_text(metadata['metadataSource'],150)
+            game.update(inventory(self.game_root/id/'input',metadata,game['appId']))
             self._import_icon(self.game_root/id/'input',self.game_root/id,metadata,game)
             game['updatedAt']=now(); write_json(self.game_root/id/'manifest.json',game)
         return game
 
     def _unpack(self,source,output,event,report):
         output.mkdir()
-        source_files=files(source); decoded=0; issues=[]
+        source_files=payload_files(source); roles=source_roles(source); decoded=0; issues=[]; web_data=[]; output_bytes=0
         for index,file in enumerate(source_files):
             check_cancel(event); rel=file.relative_to(source)
-            if file.suffix.lower() in ('.pkg','.ttpkg','.wxapkg'):
+            if original_package(file,roles.get(rel.as_posix(),'')):
                 destination=output/'packages'/rel.parent/file.stem
                 try:
                     report(message='解包 '+file.name,progress=round(index/max(1,len(source_files))*65))
-                    unpack_package(file,destination,event); decoded+=1
+                    detail=unpack_package(file,destination,event); decoded+=1
+                    output_bytes+=detail['bytes'] if 'bytes' in detail else sum(path.stat().st_size for path in files(destination))
                 except FormatError as error: issues.append({'path':rel.as_posix(),'message':str(error)})
             else:
+                with file.open('rb') as stream: header=stream.read(22)
+                is_web_data=any(header.startswith(value) for value in WEB_DATA_SIGNATURES)
+                expanded=web_data_entries(file,event)[2] if is_web_data else 0
+                if output_bytes+file.stat().st_size+expanded>MAX_EXPANDED: raise FormatError('缓存与展开资源超过单次 32 GiB，请分组处理。')
                 target=output/'cached'/rel; target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(file,target)
-        if issues and not decoded and not any(p.suffix.lower() in ASSET_EXT or p.suffix.lower()=='.js' for p in files(output) if p.name!='manifest.json'):
+                output_bytes+=file.stat().st_size
+                if is_web_data:
+                    report(message='展开 WebData 缓存 '+file.name,progress=round(index/max(1,len(source_files))*65))
+                    detail=unpack_web_data(file,output/'unity-web-data'/rel,event); output_bytes+=detail['bytes']
+                    web_data.append({'path':rel.as_posix(),**detail})
+            if output_bytes>MAX_EXPANDED: raise FormatError('展开资源超过单次 32 GiB，请分组处理。')
+        if issues and not decoded and not any(asset_file(p) or p.suffix.lower()=='.js' for p in files(output)):
             raise FormatError(issues[0]['message'])
         # Resolve cacheList URL metadata into an additional readable mirror. Keep
         # hashed originals; duplicate URL collisions are never overwritten.
@@ -373,24 +482,39 @@ class MiniGameService:
                 if not isinstance(url,str) or not isinstance(entry,(str,dict)): continue
                 local=entry if isinstance(entry,str) else entry.get('url') or entry.get('path') or entry.get('fileName')
                 if not isinstance(local,str): continue
-                # Cocos cache managers record sandbox URIs, not OS paths. Resolve
-                # only the documented gamecaches sandbox into this imported copy.
-                if local.startswith('ttfile://user/gamecaches/'):
-                    local=local[len('ttfile://user/gamecaches/'):]
-                elif local.startswith('wxfile://usr/gamecaches/'):
-                    local=local[len('wxfile://usr/gamecaches/'):]
+                # Resolve explicit sandbox URIs within this cache group's
+                # namespace, including resources beside the gamecaches index.
+                base=index.parent
+                sandbox_prefix=next((prefix for prefix in ('ttfile://user/','wxfile://usr/') if local.startswith(prefix)),None)
+                if sandbox_prefix:
+                    if index.parent.name!='gamecaches': continue
+                    base=index.parent.parent
+                    local=unquote(local[len(sandbox_prefix):])
                 elif local.startswith('gamecaches/') and index.parent.name=='gamecaches':
                     local=local[len('gamecaches/'):]
                 try: relative=safe_path(local.removeprefix('./')); remote=safe_path(unquote(urlsplit(url).path).lstrip('/'))
                 except (ValueError,FormatError): continue
-                candidate=index.parent/relative
-                if candidate.is_file() and candidate.resolve().is_relative_to(output.resolve()):
+                candidate=base/relative
+                if candidate.is_file() and candidate.resolve().is_relative_to(base.resolve()) and base.resolve().is_relative_to(output.resolve()):
                     target=output/'cdn-assets'/remote
                     if not target.exists():
                         size=candidate.stat().st_size
                         if mirrored_bytes+size>MAX_EXPANDED: raise FormatError('解包及缓存路径镜像超过单次 32 GiB，请分包处理。')
                         mirrored_bytes+=size; target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(candidate,target)
-        return {'packagesDecoded':decoded,'issues':issues}
+        return {'packagesDecoded':decoded,'webDataContainers':web_data,'issues':issues}
+
+    def _unity_input(self,source,output,event):
+        """Expose recovered files to AssetRipper once; retain raw WebData elsewhere."""
+        output.mkdir()
+        for file in files(source):
+            check_cancel(event)
+            with file.open('rb') as stream: header=stream.read(22)
+            if any(header.startswith(value) for value in WEB_DATA_SIGNATURES): continue
+            target=output/file.relative_to(source); target.parent.mkdir(parents=True,exist_ok=True)
+            try: os.link(file,target)
+            except OSError: shutil.copyfile(file,target)
+        if not files(output): raise ValueError('WebData 缓存未恢复出可处理资源；原始文件保留，请检查容器完整性。')
+        return output
 
     def export(self,fields):
         id=identifier(fields.get('gameId')); game=self.get_game(id)['game']; mode=fields.get('mode','assets')
@@ -411,7 +535,8 @@ class MiniGameService:
                         if updated['engine'] not in ('unity','tuanjie'): raise ValueError('未识别到 Unity 或团结资源。请先解包并查看识别依据。')
                         if not self.assetripper: raise ValueError('请先配置电脑 AssetRipper。')
                         report(message='AssetRipper 正在导出，进度按实际阶段更新。',progress=None)
-                        result=self.assetripper.export([pending/'unpacked'],content,updated['engineVariant'] or 'auto',
+                        unity_input=self._unity_input(pending/'unpacked',pending/'unity-input',event)
+                        result=self.assetripper.export([unity_input],content,updated['engineVariant'] or 'auto',
                             cancel_event=event,progress_callback=lambda value:report(message=str(value.get('message',value.get('phase','AssetRipper 正在处理')))[:300],progress=None))
                         detail['assetripper']={k:v for k,v in result.items() if k not in ('output_dir','manifest_path')}
                         if result.get('status')=='partial':
@@ -421,10 +546,11 @@ class MiniGameService:
                     else:
                         for file in files(pending/'unpacked'):
                             check_cancel(event)
-                            if mode=='assets' and file.suffix.lower() not in ASSET_EXT and not file.name.lower().endswith(('.atlas.txt','.json.txt','.skel.bytes')): continue
+                            if mode=='assets' and not asset_file(file): continue
                             dest=content/file.relative_to(pending/'unpacked'); dest.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(file,dest)
                     shutil.rmtree(pending/'unpacked',ignore_errors=True)
-                exported_game={key:game[key] for key in ('platform','appId','name','nameSource','appIdSource','metadataSource','cacheLabel','version','cacheModifiedAt') if key in game}
+                    shutil.rmtree(pending/'unity-input',ignore_errors=True)
+                exported_game={key:game[key] for key in ('platform','appId','name','nameSource','appIdSource','metadataSource','cacheLabel','version','cacheModifiedAt','packageCount','packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation') if key in game}
                 exported_game['iconAvailable']=False
                 try:
                     icon=self.icon_file(id)
@@ -565,7 +691,7 @@ class MiniGameService:
                     'annotations':{'readOnlyHint':read_only,'destructiveHint':False,'idempotentHint':read_only,'openWorldHint':not read_only}}
         ident={'type':'string','format':'uuid'}
         return [
-            spec('list','List imported mini-games with AppID/name mapping, associated icon and cache modification time. latest/earliest sort applies before pagination; unknown times are last. Phone cache scans are separate.',{'platform':{'enum':['all','douyin','wechat','unknown']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100},'sort':{'enum':['latest','earliest']}}),
+            spec('list','List imported mini-game packages and downloaded resource caches with separate counts/bytes, explicit cache association, engine evidence and modification time. Unassociated caches remain separate. latest/earliest sort applies before pagination; unknown times are last. Phone cache scans are separate.',{'platform':{'enum':['all','douyin','wechat','unknown']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100},'sort':{'enum':['latest','earliest']}}),
             spec('get','Read one game and its completed immutable exports.',{'id':ident},('id',)),
             spec('scan','Refresh imported desktop games. To scan host caches use the Android minigame tool through devhelper_call_tool.',{'platform':{'enum':['all','douyin','wechat','unknown']}},read_only=False),
             spec('import','Import a selected ZIP attachment, including a phone raw-cache export. Copies original before queuing; poll returned job.',{'attachmentId':ident,'platform':{'enum':['douyin','wechat','unknown']},'name':{'type':'string','maxLength':160}},('attachmentId',),False),

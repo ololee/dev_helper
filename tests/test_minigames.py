@@ -10,7 +10,7 @@ import unittest
 import zipfile
 
 from knowledge import KnowledgeService
-from minigame_formats import derive_key, rc4, unpack_package, unpack_zip, inspect_tree, FormatError
+from minigame_formats import derive_key, rc4, unpack_package, unpack_zip, unpack_web_data, inspect_tree, FormatError
 from minigames import MiniGameService
 
 
@@ -40,6 +40,16 @@ def wxapkg(entries):
     return b'\xbe'+struct.pack('>III',0,index_size,len(payload))+b'\xed'+table+payload
 
 
+def webdata(entries,tuanjie=False):
+    signature=b'TuanjieWebData1.0\0' if tuanjie else b'UnityWebData1.0\0'
+    header_size=len(signature)+4+sum(12+len(name.encode()) for name,_ in entries)
+    table=bytearray(); payload=bytearray(); offset=header_size
+    for name,raw in entries:
+        encoded=name.encode(); table.extend(struct.pack('<iii',offset,len(raw),len(encoded))+encoded)
+        payload.extend(raw); offset+=len(raw)
+    return signature+struct.pack('<i',header_size)+table+payload
+
+
 def wait(service,job):
     end=time.monotonic()+8
     while job['state'] in ('queued','running'):
@@ -49,6 +59,38 @@ def wait(service,job):
 
 
 class FormatsTests(unittest.TestCase):
+    def test_unity_and_tuanjie_webdata_preserve_bytes_and_identify_valid_containers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for index,tuanjie in enumerate((False,True)):
+                source=root/f'cache-{index}'
+                entries=[('data.tj3d' if tuanjie else 'data.unity3d',b'owned serialized data'),('StreamingAssets/shared.res',b'UnityFS\0\x00\x00\x00\x072022.3.61'+(b't9' if tuanjie else b'f1')+b'\0')]
+                source.write_bytes(webdata(entries,tuanjie)); original=source.read_bytes()
+                inspected=inspect_tree(root)
+                self.assertEqual(inspected['engine'],'tuanjie' if tuanjie else 'unity')
+                result=unpack_web_data(source,root/f'out-{index}')
+                self.assertEqual(result['decoder'],'tuanjie-web-data' if tuanjie else 'unity-web-data')
+                for name,data in entries: self.assertEqual((root/f'out-{index}'/name).read_bytes(),data)
+                self.assertEqual(source.read_bytes(),original)
+
+    def test_webdata_invalid_indexes_cannot_create_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); source=root/'cache'
+            invalid=[webdata([('../outside',b'x')]),webdata([('/absolute',b'x')]),webdata([('a',b'x'),('A',b'y')]),
+                     webdata([('file',b'x'),('file/child',b'y')]),webdata([('bad\\path',b'x')]),webdata([('drive:path',b'x')]),
+                     b'UnityWebData1.0\0'+struct.pack('<i',0),webdata([('texture',b'bytes')])[:-1]]
+            start=len(b'UnityWebData1.0\0')+4
+            for offset in (-1,0,2**31-1):
+                data=bytearray(webdata([('texture',b'bytes')]))
+                struct.pack_into('<i',data,start,offset); invalid.append(bytes(data))
+            for index,data in enumerate(invalid):
+                source.write_bytes(data); output=root/f'out-{index}'
+                with self.assertRaises(FormatError): unpack_web_data(source,output)
+                self.assertFalse(output.exists())
+            self.assertFalse((root.parent/'outside').exists())
+            source.write_bytes(b'TuanjieWebData1.0\0not-a-valid-table')
+            self.assertEqual(inspect_tree(root)['engine'],'unknown')
+
     def test_wechat_main_game_entries_and_wrapper_paths(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); source=root/'main.wxapkg'; output=root/'unpacked/packages/cache/main'
@@ -171,6 +213,145 @@ class FormatsTests(unittest.TestCase):
 
 
 class LibraryTests(unittest.TestCase):
+    def test_mixed_inventory_counts_payload_only_and_exports_extensionless_assets(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'phone.zip'
+            package=tpkg([('game.js',b'cc.game.run();')])
+            encoded=io.BytesIO(); Image.new('RGB',(8,8),'red').save(encoded,format='PNG'); image=encoded.getvalue()
+            cache={'payload/cache/common.res':b'UnityFS\0\x00\x00\x00\x072022.3.61f1\0',
+                   'payload/cache/opaque-image':image,'payload/cache/opaque-audio':b'RIFF\x04\x00\x00\x00WAVE',
+                   'payload/cache/opaque-data':b'unknown cached data'}
+            metadata={'platform':'wechat','appId':'wx0123456789abcdef','cacheAssociation':'scoped-appid',
+                      'packageCount':1,'packageBytes':len(package),'cacheFileCount':len(cache),'cacheBytes':sum(map(len,cache.values())),
+                      'inventoryKind':'mixed','iconAvailable':True,'iconArchivePath':'metadata/app-icon.png','iconSource':'manual'}
+            manifest={'game':metadata,'files':[{'path':'payload/main.wxapkg','kind':'package'}]+[{'path':name,'kind':'cache'} for name in cache]}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps(manifest)); archive.writestr('metadata/app-icon.png',image)
+                archive.writestr('payload/main.wxapkg',package)
+                for name,data in cache.items(): archive.writestr(name,data)
+            try:
+                imported=wait(service,service.import_archive(source)); self.assertEqual(imported['state'],'completed',imported)
+                game=imported['result']['game']
+                for field in ('packageCount','packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation'): self.assertEqual(game[field],metadata[field])
+                self.assertEqual(game['bytes'],len(package)+sum(map(len,cache.values())))
+                self.assertEqual(game['inventoryIssues'],[])
+                exported=wait(service,service.export({'gameId':game['id'],'mode':'assets','notify':False})); self.assertEqual(exported['state'],'completed',exported)
+                export_id=exported['result']['exportId']
+                expected={'cached/'+name for name in cache if not name.endswith('opaque-data')}
+                listing={item['path']:item for item in exported['result']['export']['files']}
+                self.assertTrue(expected<=set(listing)); self.assertNotIn('cached/manifest.json',listing)
+                self.assertNotIn('cached/metadata/app-icon.png',listing)
+                self.assertEqual(listing['cached/payload/cache/opaque-image']['kind'],'image')
+                self.assertEqual(listing['cached/payload/cache/opaque-audio']['kind'],'audio')
+                for name in expected: self.assertEqual(service.export_file(export_id,name).read_bytes(),cache[name.removeprefix('cached/')])
+                raw=wait(service,service.export({'gameId':game['id'],'mode':'raw','notify':False}))
+                restored=wait(service,service.import_archive(service.export_file(raw['result']['exportId'])))['result']['game']
+                self.assertEqual(restored['cacheAssociation'],'scoped-appid'); self.assertEqual(restored['cacheBytes'],metadata['cacheBytes'])
+            finally: service.close()
+
+    def test_legacy_cache_inventory_uses_file_type_and_cannot_invent_an_appid(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'legacy.zip'
+            # A filename suffix does not turn an explicitly cached resource into an original release package.
+            cache={'payload/shared-resource.pkg':b'unknown resource','payload/cache-index.json':b'{}'}
+            metadata={'platform':'wechat','source':'phone-cache','cacheAssociation':'scoped-appid','packageCount':50,'cacheFileCount':0}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps({'game':metadata,'files':[{'path':name,'type':'cache'} for name in cache]}))
+                for name,data in cache.items(): archive.writestr(name,data)
+                archive.writestr('metadata/app-icon.png',b'unassociated icon must not enter cache count')
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']
+                self.assertEqual(game['packageCount'],0); self.assertEqual(game['packageBytes'],0)
+                self.assertEqual(game['cacheFileCount'],2); self.assertEqual(game['cacheBytes'],sum(map(len,cache.values())))
+                self.assertEqual(game['inventoryKind'],'cache'); self.assertEqual(game['cacheAssociation'],'unassociated')
+                self.assertEqual(game['appId'],''); self.assertEqual(game['name'],''); self.assertTrue(game['inventoryIssues'])
+                unpacked=wait(service,service.export({'gameId':game['id'],'mode':'unpacked','notify':False}))
+                self.assertEqual(unpacked['state'],'completed',unpacked)
+                self.assertEqual(unpacked['result']['export']['detail']['packagesDecoded'],0)
+                for name,data in cache.items():
+                    self.assertEqual(service.export_file(unpacked['result']['exportId'],'cached/'+name).read_bytes(),data)
+                service.metadata(game['id'],{'name':'手动缓存标签'})
+                raw=wait(service,service.export({'gameId':game['id'],'mode':'raw','notify':False}))
+                self.assertEqual(raw['state'],'completed',raw)
+                restored=wait(service,service.import_archive(service.export_file(raw['result']['exportId'])))['result']['game']
+                self.assertEqual(restored['packageCount'],0); self.assertEqual(restored['cacheFileCount'],2)
+                self.assertEqual(restored['cacheBytes'],sum(map(len,cache.values())))
+                self.assertEqual(restored['cacheAssociation'],'unassociated'); self.assertEqual(restored['appId'],'')
+                self.assertEqual(restored['name'],'手动缓存标签'); self.assertEqual(restored['nameSource'],'manual')
+            finally: service.close()
+
+    def test_existing_import_gets_cache_statistics_without_changing_saved_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'source.zip'
+            package=tpkg([('game.js',b'cc.game.run();')]); cache=b'UnityFS\0\x00\x00\x00\x072022.3.61f1\0'
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('main.pkg',package); archive.writestr('downloaded-resource',cache)
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']; id=game['id']
+                game=service.metadata(id,{'name':'保留手动名称'}); service.close()
+                path=service.game_root/id/'manifest.json'
+                old=json.loads(path.read_text())
+                for key in ('packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation'): old.pop(key)
+                path.write_text(json.dumps(old))
+                service=MiniGameService(root/'library')
+                updated=service.get_game(id)['game']
+                self.assertEqual(updated['id'],id); self.assertEqual(updated['name'],'保留手动名称')
+                self.assertEqual(updated['nameSource'],'manual'); self.assertEqual(updated['cacheModifiedAt'],game['cacheModifiedAt'])
+                self.assertEqual(updated['packageBytes'],len(package)); self.assertEqual(updated['cacheBytes'],len(cache))
+                self.assertEqual(updated['cacheFileCount'],1); self.assertEqual(updated['inventoryKind'],'mixed')
+                self.assertEqual((service.game_root/id/'input/downloaded-resource').read_bytes(),cache)
+            finally: service.close()
+
+    def test_webdata_expansion_reaches_assetripper_without_duplicate_wrappers(self):
+        class InspectingAdapter:
+            def export(self,input_paths,output_dir,variant,**options):
+                selected=input_paths[0]
+                files={path.relative_to(selected).as_posix():path.read_bytes() for path in selected.rglob('*') if path.is_file()}
+                if any(data.startswith((b'UnityWebData1.0\0',b'TuanjieWebData1.0\0')) for data in files.values()): raise AssertionError('raw container was passed to AssetRipper again')
+                assert any(name.endswith('/data.tj3d') and data==b'owned data fixture' for name,data in files.items())
+                assert sum(data.startswith(b'UnityFS\0') for data in files.values())==1
+                assert variant=='tuanjie'
+                (output_dir/'recovered.asset').write_bytes(b'owned exported fixture')
+                return {'status':'completed','asset_count':1,'file_count':1,'failed_collections':0}
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library',assetripper=InspectingAdapter()); source=root/'cache.zip'
+            bundle=b'UnityFS\0\x00\x00\x00\x072022.3.61t9\0'
+            container=webdata([('data.tj3d',b'owned data fixture'),('StreamingAssets/common.res',bundle)],True)
+            metadata={'platform':'wechat','inventoryKind':'cache','cacheAssociation':'unassociated','packageCount':0,
+                      'packageBytes':0,'cacheFileCount':1,'cacheBytes':len(container)}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('manifest.json',json.dumps({'game':metadata})); archive.writestr('payload/cache/opaque-web-data',container)
+            original=source.read_bytes()
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']
+                self.assertEqual(game['engine'],'tuanjie'); self.assertEqual(game['packageCount'],0)
+                self.assertEqual(game['inventoryKind'],'cache'); self.assertEqual(game['appId'],'')
+                unpacked=wait(service,service.export({'gameId':game['id'],'mode':'unpacked','notify':False}))
+                self.assertEqual(unpacked['state'],'completed',unpacked)
+                export_id=unpacked['result']['exportId']
+                self.assertEqual(service.export_file(export_id,'cached/payload/cache/opaque-web-data').read_bytes(),container)
+                self.assertEqual(service.export_file(export_id,'unity-web-data/payload/cache/opaque-web-data/StreamingAssets/common.res').read_bytes(),bundle)
+                self.assertEqual(unpacked['result']['export']['detail']['webDataContainers'][0]['decoder'],'tuanjie-web-data')
+                project=wait(service,service.export({'gameId':game['id'],'mode':'unity-project','notify':False}))
+                self.assertEqual(project['state'],'completed',project)
+                self.assertEqual(source.read_bytes(),original)
+            finally: service.close()
+
+    def test_corrupt_webdata_fails_closed_while_original_cache_can_still_export(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'cache.zip'
+            corrupt=b'TuanjieWebData1.0\0'+struct.pack('<i',20)+b'bad index'
+            with zipfile.ZipFile(source,'w') as archive: archive.writestr('payload/cache/opaque-web-data',corrupt)
+            try:
+                game=wait(service,service.import_archive(source))['result']['game']; self.assertEqual(game['engine'],'unknown')
+                processed=wait(service,service.export({'gameId':game['id'],'mode':'unpacked','notify':False}))
+                self.assertEqual(processed['state'],'failed'); self.assertIn('WebData',processed['error'])
+                self.assertEqual(service.get_game(game['id'])['exports'],[])
+                raw=wait(service,service.export({'gameId':game['id'],'mode':'raw','notify':False})); self.assertEqual(raw['state'],'completed')
+                self.assertEqual(service.export_file(raw['result']['exportId'],'payload/cache/opaque-web-data').read_bytes(),corrupt)
+            finally: service.close()
+
     def test_cache_time_sort_is_global_unknown_last_and_stable(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); service=MiniGameService(root/'library'); source=root/'source.zip'
@@ -438,6 +619,32 @@ class LibraryTests(unittest.TestCase):
                 exported=wait(service,service.export({'gameId':id,'mode':'assets','notify':False}))
                 self.assertEqual(exported['state'],'completed',exported)
                 self.assertEqual(service.export_file(exported['result']['exportId'],'cdn-assets/assets/main/native/hero.png').read_bytes(),b'image bytes')
+            finally:service.close()
+
+    def test_cache_list_sibling_resources_stay_in_their_imported_namespace(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); source=root/'data.zip'
+            mapping={'files':{
+                'https://cdn.example/images/wx.png':{'url':'wxfile://usr/res/shared.png'},
+                'https://cdn.example/images/tt.png':{'url':'ttfile://user/res/shared.png'},
+                'https://cdn.example/images/forbidden.png':{'url':'wxfile://usr/%2e%2e/other/res/shared.png'},
+                'https://cdn.example/images/missing.png':{'url':'wxfile://usr/res/only-other.png'},
+            }}
+            with zipfile.ZipFile(source,'w') as archive:
+                archive.writestr('payload/current/gamecaches/cacheList.json',json.dumps(mapping))
+                archive.writestr('payload/current/res/shared.png',b'current namespace resource')
+                archive.writestr('payload/other/res/shared.png',b'other namespace resource')
+                archive.writestr('payload/other/res/only-other.png',b'other-only namespace resource')
+            try:
+                imported=wait(service,service.import_archive(source)); game=imported['result']['game']
+                exported=wait(service,service.export({'gameId':game['id'],'mode':'assets','notify':False}))
+                self.assertEqual(exported['state'],'completed',exported)
+                export_id=exported['result']['exportId']
+                for name in ('wx.png','tt.png'):
+                    self.assertEqual(service.export_file(export_id,'cdn-assets/images/'+name).read_bytes(),b'current namespace resource')
+                names={item['path'] for item in exported['result']['export']['files']}
+                self.assertNotIn('cdn-assets/images/forbidden.png',names); self.assertNotIn('cdn-assets/images/missing.png',names)
+                self.assertEqual(service.export_file(export_id,'cached/payload/current/res/shared.png').read_bytes(),b'current namespace resource')
             finally:service.close()
 
 

@@ -9,13 +9,13 @@
 </head>
 <body data-device="android">
 <main class="workbench">
-<header class="workspace-header"><div><h1>小游戏</h1><p id="device-hint">查看缓存，按游戏整理资源。</p></div><div class="row"><button id="refresh" type="button">刷新列表</button><button id="choose-zip" type="button">导入 ZIP</button></div></header>
+<header class="workspace-header"><div><h1>小游戏</h1><p id="device-hint">查看原发布包与已下载的资源缓存。</p></div><div class="row"><button id="refresh" type="button">刷新列表</button><button id="choose-zip" type="button">导入 ZIP</button></div></header>
 <div id="message" class="message" role="status" aria-live="polite" hidden></div>
 <input id="zip-input" type="file" accept=".zip,application/zip" hidden>
 <div class="workspace">
 <aside class="library" aria-label="游戏列表">
 <div class="library-controls"><label for="platform">平台</label><div class="row"><select id="platform"><option value="douyin">抖音</option><option value="wechat">微信</option><option value="all">全部平台</option></select><button id="scan" class="primary" type="button">扫描缓存</button></div><div class="sort-control"><label for="sort">缓存修改时间</label><select id="sort"><option value="latest">最近修改在前</option><option value="earliest">最早修改在前</option></select></div><label class="search-label" for="search">查找当前页</label><input id="search" type="search" placeholder="游戏名、ID 或缓存文件名" autocomplete="off"><p id="scan-hint" class="hint">扫描只读取当前设备已有的游戏缓存。</p></div>
-<div class="library-heading"><h2>游戏列表</h2><span id="game-count" class="hint">正在读取</span></div>
+<div class="library-heading"><h2>原包与下载缓存</h2><span id="game-count" class="hint">正在读取</span></div>
 <div id="game-list" class="game-list"></div><div id="library-empty" class="empty small" hidden><strong>还没有找到游戏</strong><p>从电脑导入已有游戏 ZIP，或扫描手机缓存。</p></div>
 <div class="pagination"><button id="previous" type="button" disabled>上一页</button><span id="page-label" class="hint">第 1 页</span><button id="next" type="button" disabled>下一页</button></div>
 </aside>

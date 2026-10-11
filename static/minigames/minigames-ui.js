@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const DEVICE = document.body.dataset.device === 'android' ? 'android' : 'mac';
 const MAC_API = '/device-api/mac/api/knowledge';
 const MODES = {
-  raw: ['原始包', '保留设备缓存中的包和清单，便于在电脑继续处理。'],
+  raw: ['原包与缓存', '保留选定的原发布包和已下载资源，文件名与原始字节完整保存。'],
   unpacked: ['代码与包内容', '解开支持的包格式，整理脚本与目录。'],
   assets: ['资源文件', '整理图片、音频和 Spine 等可识别资源。'],
   'unity-project': ['Unity 项目', '在电脑使用 AssetRipper 导出可编辑项目。']
@@ -36,7 +36,12 @@ async function api(path, body, root = API_ROOT, timeoutMs = 45000) {
 function size(value) { const bytes = Number(value); if (!Number.isFinite(bytes) || bytes < 0) return '未知'; if (bytes < 1024) return bytes + ' B'; if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'; if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB'; return (bytes / 1073741824).toFixed(2) + ' GB'; }
 function platformName(value) { return ({ douyin: '抖音', wechat: '微信' })[value] || '来源未确认'; }
 function gameName(game) { return String(game?.name || '').trim() || game?.appId || game?.cacheLabel || '名称待补充'; }
-function gameTypeName(game) { return ({ game: '小游戏', miniprogram: '小程序' })[game?.gameType] || '类型待确认'; }
+function gameTypeName(game) { if (game?.inventoryKind === 'cache') return '下载缓存'; return ({ game: '小游戏', miniprogram: '小程序' })[game?.gameType] || '类型待确认'; }
+function modeLabel(mode, game = ui.selected) { return mode === 'raw' && game?.inventoryKind === 'cache' ? '缓存资源' : MODES[mode]?.[0] || '导出结果'; }
+function inventoryCount(game, field) { const value = game?.[field]; return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null; }
+function inventoryLine(game, kind) { const count = inventoryCount(game, kind === 'package' ? 'packageCount' : 'cacheFileCount'), bytes = game?.[kind === 'package' ? 'packageBytes' : 'cacheBytes']; return (kind === 'package' ? '原包 ' : '下载缓存 ') + (count === null ? '数量待统计' : count + (kind === 'package' ? ' 个' : ' 个文件')) + ' · ' + size(bytes); }
+function cacheAssociationName(game) { return ({ none: '仅原发布包', 'scoped-appid': '已确认同一 AppID', 'scoped-directory': '独立缓存目录，AppID 待确认', 'version-unconfirmed': '同一 AppID，缓存版本待确认', unassociated: '宿主资源缓存，归属待确认' })[game?.cacheAssociation] || '未提供关联依据'; }
+function issueText(issue) { return String(typeof issue === 'string' ? issue : issue?.message || '缓存内容不完整。').replace(/^[a-z][a-z0-9_]{0,79}:\s*/, ''); }
 function cacheTime(game) { const value = game?.cacheModifiedAt; return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 8640000000000000 ? value : 0; }
 function dateTime(value) { const stamp = Number(value); if (!Number.isFinite(stamp) || stamp <= 0 || stamp > 8640000000000000) return '未知'; return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(stamp)); }
 function associationSource(value) { if (value === 'manual') return '手动设置'; if (String(value || '').startsWith('wechat-')) return '微信缓存元信息'; if (value === 'package-metadata') return '包内元信息'; if (value === 'imported-metadata') return '导入包的关联信息'; return value ? '缓存元信息' : '未确认'; }
@@ -77,8 +82,9 @@ function renderGames() {
   for (const game of games) {
     const row = button('', () => selectGame(game), 'game-row'); row.setAttribute('aria-pressed', String(ui.selected?.id === game.id));
     const heading = node('div', 'game-row-heading'), identity = node('div', 'game-row-identity'); identity.append(node('strong', '', gameName(game)), node('div', 'identifier', game.appId || 'AppID 待确认')); heading.append(gameIcon(game), identity); row.append(heading);
-    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', gameTypeName(game)), node('span', '', size(game.bytes)), node('span', 'engine-label', engineName(game, true)));
-    const time = node('time', 'cache-time', cacheTime(game) ? '缓存修改 · ' + dateTime(cacheTime(game)) : '缓存修改时间未知'); if (cacheTime(game)) time.dateTime = new Date(cacheTime(game)).toISOString(); time.title = '缓存文件的修改时间，不代表最后游玩时间。'; row.append(meta, time); list.append(row);
+    const meta = node('div', 'game-meta'); meta.append(node('span', '', platformName(game.platform)), node('span', '', gameTypeName(game)), node('span', 'engine-label', engineName(game, true)));
+    const inventory = node('div', 'cache-inventory'); inventory.append(node('span', '', inventoryLine(game, 'package')), node('span', '', inventoryLine(game, 'cache')));
+    const time = node('time', 'cache-time', cacheTime(game) ? '缓存修改 · ' + dateTime(cacheTime(game)) : '缓存修改时间未知'); if (cacheTime(game)) time.dateTime = new Date(cacheTime(game)).toISOString(); time.title = '缓存文件的修改时间，不代表最后游玩时间。'; row.append(meta, inventory, time); list.append(row);
   }
   $('game-count').textContent = (Number.isFinite(ui.total) ? ui.total : ui.games.length) + ' 个';
   $('library-empty').hidden = games.length > 0;
@@ -100,8 +106,8 @@ async function refreshGames(preferredId) {
   finally { if (request === ui.listRequest) $('refresh').disabled = false; }
 }
 function facts(game) {
-  const source = typeof game.source === 'string' ? ({ imported: '导入的游戏包', cache: '设备缓存', 'android-cache': '手机缓存', desktop: '电脑资料' })[game.source] || game.source : game.source?.label || (DEVICE === 'android' ? '手机缓存' : '电脑资料');
-  const values = [['平台', platformName(game.platform)], ['缓存类型', gameTypeName(game)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['缓存包', (Number(game.packageCount) || 0) + ' 个'], ['总大小', size(game.bytes)], ['缓存修改时间', dateTime(cacheTime(game))], ['名称来源', game.name ? associationSource(game.nameSource || game.metadataSource) : '尚未确认名称'], ['图标关联', game.iconAvailable === true ? associationSource(game.iconSource || game.metadataSource) : '未找到可靠关联'], ['资料来源', source]];
+  const source = typeof game.source === 'string' ? ({ imported: '导入的原包与缓存', cache: '设备缓存', 'android-cache': '手机缓存', 'phone-cache': '手机缓存', desktop: '电脑资料' })[game.source] || game.source : game.source?.label || (DEVICE === 'android' ? '手机缓存' : '电脑资料');
+  const values = [['平台', platformName(game.platform)], ['缓存类型', gameTypeName(game)], ['包版本', game.version || '未发现版本'], ['引擎版本', game.engineVersion || '版本未确认'], ['原发布包', inventoryLine(game, 'package').replace(/^原包 /, '')], ['下载资源缓存', inventoryLine(game, 'cache').replace(/^下载缓存 /, '')], ['缓存关联', cacheAssociationName(game)], ['载荷总大小', size(game.bytes)], ['缓存修改时间', dateTime(cacheTime(game))], ['名称来源', game.name ? associationSource(game.nameSource || game.metadataSource) : '尚未确认名称'], ['图标关联', game.iconAvailable === true ? associationSource(game.iconSource || game.metadataSource) : '未找到可靠关联'], ['资料来源', source]];
   if (game.source === 'imported' && game.createdAt) values.push(['导入电脑时间', dateTime(game.createdAt)]);
   if (game.scannedAt) values.push(['DevHelper 扫描时间', dateTime(game.scannedAt)]);
   const list = $('game-facts'); list.replaceChildren(); for (const [label, value] of values) { const item = node('div'); item.append(node('dt', '', label), node('dd', '', value)); list.append(item); }
@@ -110,16 +116,16 @@ function availableModes(game) { game = game || {}; const modes = Array.isArray(g
 function renderModes() {
   const modes = availableModes(ui.selected); if (!modes.includes(ui.mode)) ui.mode = modes.includes('assets') ? 'assets' : 'raw';
   const list = $('export-modes'); list.replaceChildren();
-  for (const mode of modes) { const item = button('', () => { ui.mode = mode; renderModes(); }, 'mode-button'); item.setAttribute('aria-pressed', String(ui.mode === mode)); item.append(node('strong', '', MODES[mode][0]), node('span', '', MODES[mode][1])); list.append(item); }
+  for (const mode of modes) { const item = button('', () => { ui.mode = mode; renderModes(); }, 'mode-button'); item.setAttribute('aria-pressed', String(ui.mode === mode)); item.append(node('strong', '', modeLabel(mode)), node('span', '', MODES[mode][1])); list.append(item); }
   $('export-device').textContent = DEVICE === 'android' ? '手机处理缓存' : '这台电脑处理';
-  $('export-note').textContent = DEVICE === 'android' ? ui.mode !== 'raw' ? '手机处理已缓存且支持的包内容。Unity／团结资源请导出原始包到电脑，继续处理。' : API_ROOT.startsWith('/device-api/') ? '手机导出原始缓存包。完成后点击“下载到电脑继续处理”，再切换到电脑查看与导出资源；Unity 处理也在电脑完成。' : '手机导出原始缓存包。下载 ZIP 后，在电脑 DevHelper 工作台点击“导入 ZIP”继续处理资源；Unity 处理也在电脑完成。' : ui.mode === 'unity-project' ? '识别 Unity 资源后由 AssetRipper 处理。导出内容取决于包内资源与版本支持，不等同于原始开发工程。' : '只处理当前游戏已缓存或导入的内容。没有下载到设备的资源不会出现在结果里。';
-  $('start-export').disabled = !ui.selected || ui.busy; $('start-export').textContent = '导出' + MODES[ui.mode][0];
+  $('export-note').textContent = DEVICE === 'android' ? ui.mode !== 'raw' ? '手机处理已缓存且支持的包内容。Unity／团结的下载缓存请一起传电脑继续处理。' : API_ROOT.startsWith('/device-api/') ? '导出选定的原包与已下载缓存。完成后点击“下载到电脑继续处理”；Unity／团结资源在电脑展开与导出。' : '选定的原包与已下载缓存完整保留。下载 ZIP 后，在电脑 DevHelper 工作台导入，继续处理资源。' : ui.mode === 'unity-project' ? '展开 Unity／团结 WebData 容器后交给 AssetRipper。尚未下载的资源和无法确认归属的其他缓存不会自动合并。' : '只处理当前记录内已缓存或导入的内容。没有下载到设备的资源不会出现在结果里。';
+  $('start-export').disabled = !ui.selected || ui.busy; $('start-export').textContent = '导出' + modeLabel(ui.mode);
 }
 function renderDetail(game) {
   $('detail-empty').hidden = true; $('detail-content').hidden = false; $('game-name').textContent = gameName(game); $('game-id').textContent = 'AppID：' + (game.appId || '缓存中未提供'); $('game-icon').replaceChildren(gameIcon(game, true));
   const label = engineName(game); $('engine-badge').textContent = label; $('engine-badge').classList.toggle('unknown', label === '未识别引擎'); facts(game);
   if (document.activeElement !== $('name-input')) $('name-input').value = ui.nameDrafts.has(game.id) ? ui.nameDrafts.get(game.id) : game.name || '';
-  const issues = [...(Array.isArray(game.issues) ? game.issues : []), ...(Array.isArray(game.gameTypeIssues) ? game.gameTypeIssues : []), ...(Array.isArray(game.metadataIssues) ? game.metadataIssues : [])]; $('game-issues').replaceChildren(); $('game-issues').hidden = !issues.length; for (const issue of issues) $('game-issues').append(node('p', '', typeof issue === 'string' ? issue : issue.message || issue.code || '缓存内容不完整。'));
+  const issues = [...(Array.isArray(game.issues) ? game.issues : []), ...(Array.isArray(game.gameTypeIssues) ? game.gameTypeIssues : []), ...(Array.isArray(game.metadataIssues) ? game.metadataIssues : []), ...(Array.isArray(game.inventoryIssues) ? game.inventoryIssues : [])]; $('game-issues').replaceChildren(); $('game-issues').hidden = !issues.length; for (const issue of issues) $('game-issues').append(node('p', '', issueText(issue)));
   const evidence = Array.isArray(game.evidence) ? game.evidence : []; $('evidence-list').replaceChildren();
   for (const item of evidence) { const row = node('li', '', item.path || '包内线索'); if (item.match) row.append(node('span', '', item.match)); $('evidence-list').append(row); }
   const unity = ['unity', 'tuanjie', '团结'].includes(String(game.engine || '').toLowerCase());
@@ -187,7 +193,7 @@ function renderExports() {
   }
 }
 function exportedFiles(value, root = API_ROOT) {
-  if (value.mode === 'raw' && (root.includes('/device-api/android/') || DEVICE === 'android' && root === API_ROOT)) return node('p', 'hint', '原始包保留缓存文件与清单；请下载 ZIP 查看。');
+  if (value.mode === 'raw' && (root.includes('/device-api/android/') || DEVICE === 'android' && root === API_ROOT)) return node('p', 'hint', modeLabel('raw', value.game || ui.selected) + '保留原始文件与清单；请下载 ZIP 查看。');
   const details = node('details', 'export-files'), summary = node('summary', '', '查看导出文件'), list = node('div', 'export-file-list'); details.append(summary, list); let loaded = false;
   details.addEventListener('toggle', async () => {
     if (!details.open || loaded) return; loaded = true; list.textContent = '正在读取文件…';
@@ -276,7 +282,7 @@ async function poll() {
 async function startScan() { message(''); const data = await api('/minigames/scan', { platform: $('platform').value }); const platform = $('platform').value === 'all' ? '小游戏' : platformName($('platform').value); addJob(data, { title: DEVICE === 'android' ? '扫描' + platform + '缓存' : '刷新' + platform + '游戏识别' }); toast(DEVICE === 'android' ? '扫描已开始。' : '游戏识别已开始刷新。'); }
 async function startExport() {
   if (!ui.selected || ui.busy) return; ui.busy = true; renderModes(); message('');
-  try { const body = { gameId: ui.selected.id, mode: ui.mode, notify: $('notify').checked }; if (DEVICE !== 'android') body.summarize = $('summarize').checked; const data = await api('/minigames/export', body); addJob(data, { title: gameName(ui.selected) + '：' + MODES[ui.mode][0], gameId: ui.selected.id, notify: $('notify').checked }); toast('导出已开始，进度会显示在下方。'); }
+  try { const body = { gameId: ui.selected.id, mode: ui.mode, notify: $('notify').checked }; if (DEVICE !== 'android') body.summarize = $('summarize').checked; const data = await api('/minigames/export', body); addJob(data, { title: gameName(ui.selected) + '：' + modeLabel(ui.mode), gameId: ui.selected.id, notify: $('notify').checked }); toast('导出已开始，进度会显示在下方。'); }
   catch (error) { message(error.message, true); } finally { ui.busy = false; renderModes(); }
 }
 async function uploadAttachment(file, root) {
@@ -293,7 +299,7 @@ async function importZip(file) {
   finally { ui.busy = false; $('choose-zip').disabled = false; renderModes(); }
 }
 async function transferToMac(value, root, game) {
-  const packageName = value.mode === 'raw' ? '原始包' : '导出包';
+  const packageName = value.mode === 'raw' ? modeLabel('raw', value.game || game) : '导出包';
   const task = { id: 'transfer-' + Date.now(), local: true, apiRoot: MAC_API, title: '下载到电脑继续处理', type: 'transfer', state: 'uploading', progress: null, message: '正在从手机下载' + packageName + '…' }; ui.jobs.unshift(task); renderTasks();
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 300000);
   try {
@@ -341,10 +347,10 @@ $('choose-icon').addEventListener('click', () => $('icon-input').click()); $('ic
 $('assetripper-check').addEventListener('click', () => busy($('assetripper-check'), checkAssetRipper)); $('assetripper').addEventListener('toggle', () => { if ($('assetripper').open && !ui.tool) checkAssetRipper(); });
 window.addEventListener('message', event => { if (event.origin !== window.location.origin || event.source !== window.parent || event.data?.type !== 'devhelper.minigames-visibility') return; ui.visible = event.data.visible === true; if (ui.visible) schedulePoll(100); else clearTimeout(ui.timer); });
 document.addEventListener('visibilitychange', () => { if (active()) schedulePoll(100); else clearTimeout(ui.timer); }); window.addEventListener('pagehide', () => clearTimeout(ui.timer));
-$('device-hint').textContent = DEVICE === 'android' ? '扫描手机缓存，原始包可下载到电脑处理。' : '导入游戏包，整理代码、资源与动画。';
+$('device-hint').textContent = DEVICE === 'android' ? '查看原发布包与下载缓存，Unity／团结资源传电脑处理。' : '导入原包与下载缓存，整理代码、资源与动画。';
 $('summarize').closest('label').hidden = DEVICE === 'android';
 if (DEVICE === 'android') { $('choose-zip').textContent = '导入 ZIP 到电脑'; $('choose-zip').hidden = !API_ROOT.startsWith('/device-api/'); }
-$('scan-hint').textContent = DEVICE === 'android' ? '扫描手机已有缓存。先运行过游戏，才能找到完整内容。' : '刷新电脑已导入的游戏；手机缓存请切换到手机扫描。';
+$('scan-hint').textContent = DEVICE === 'android' ? '先在手机打开目标游戏，让需要的资源完成下载，再扫描。仅导出已下载到手机的内容。' : '刷新电脑已导入的游戏；手机缓存请切换到手机扫描。';
 if (DEVICE !== 'android') $('scan').textContent = '刷新识别';
 try { const jobs = JSON.parse(localStorage.getItem(STORE) || '[]'); ui.jobs = Array.isArray(jobs) ? jobs.filter(job => job && typeof job.id === 'string' && [API_ROOT, MAC_API].includes(job.apiRoot)).slice(0, 16) : []; } catch { ui.jobs = []; }
 renderTasks(); refreshGames(new URLSearchParams(window.location.search).get('game') || undefined); restoreServerJobs(); schedulePoll();

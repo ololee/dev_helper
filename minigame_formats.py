@@ -23,6 +23,7 @@ ASSET_EXT = {'.png','.jpg','.jpeg','.webp','.gif','.bmp','.ktx','.ktx2','.pvr','
              '.mp3','.ogg','.wav','.m4a','.mp4','.webm','.ttf','.otf','.fnt','.atlas',
              '.skel','.bytes','.json','.ccon','.cconb','.bin','.obj','.mtl','.glb','.gltf',
              '.bundle','.unity3d','.asset','.assets','.res','.ress','.resource','.data','.pck'}
+WEB_DATA_SIGNATURES=(b'UnityWebData1.0\0',b'TuanjieWebData1.0\0')
 _LIZ = bytes(v & 255 for v in [45,-75,42,50,98,-31,-5,72,-62,55,-112,87,0,103,12,19,-31,43,-110,-61,-110,-16,-32,58,-96,119,-38,-30,85,36,-79,29,61,37,95,-5,121,69,-61,31,-54,66,-118,-46,-36,69,104,-91,125,-125,-92,36,-119,-28,111,82,115,108,13,-45,86,31,-3,3])
 _LIZIZ = bytes(v & 255 for v in [-66,17,-69,-98,-60,126,100,107,-22,-34,-12,-47,-126,112,-68,-27,119,63,-111,-28,102,5,-72,98,58,10,-32,4,-95,-21,-85,-120,-84,-100,-55,29,-82,106,-76,-112,43,-56,12,-13,-87,-124,1,78,69,91,100,105,-113,62,-49,-26,60,-24,-10,-1,97,98,-42,109])
 
@@ -44,6 +45,56 @@ def safe_path(value: str) -> str:
 def check_cancel(cancel=None):
     if cancel is not None and cancel.is_set():
         raise InterruptedError('任务已取消。')
+
+
+def web_data_entries(source: Path,cancel=None):
+    """Validate the standard LE WebData index completely before creating output."""
+    total=source.stat().st_size
+    with source.open('rb') as stream:
+        prefix=stream.read(22)
+        signature=next((value for value in WEB_DATA_SIGNATURES if prefix.startswith(value)),None)
+        if signature is None: raise FormatError('不是受支持的 UnityWebData 或 TuanjieWebData 容器。')
+        if len(prefix)<len(signature)+4: raise FormatError('WebData 容器头截断。')
+        header_size=struct.unpack_from('<i',prefix,len(signature))[0]
+        if not len(signature)+4<=header_size<=min(total,MAX_HEADER): raise FormatError('WebData 索引长度无效或超过 16 MiB。')
+        stream.seek(0); header=stream.read(header_size)
+    if len(header)!=header_size: raise FormatError('WebData 索引截断。')
+    position=len(signature)+4; entries=[]; names=set(); expanded=0
+    while position<header_size:
+        check_cancel(cancel)
+        if position+12>header_size: raise FormatError('WebData 目录表截断。')
+        offset,size,name_size=struct.unpack_from('<iii',header,position); position+=12
+        if not 0<name_size<=8192 or position+name_size>header_size: raise FormatError('WebData 文件名长度无效。')
+        try: name=safe_path(header[position:position+name_size].decode('utf-8'))
+        except UnicodeDecodeError: raise FormatError('WebData 文件名不是有效 UTF-8。') from None
+        position+=name_size; folded=name.casefold()
+        if folded in names: raise FormatError('WebData 有重复或大小写冲突的路径。')
+        if offset<header_size or size<0 or offset+size>total: raise FormatError('WebData 文件范围越界。')
+        names.add(folded); expanded+=size; entries.append((name,offset,size))
+        if len(entries)>MAX_FILES or expanded>MAX_EXPANDED: raise FormatError('WebData 文件数量或展开大小超过单次上限。')
+    for name,_,_ in entries:
+        parts=name.casefold().split('/')
+        if any('/'.join(parts[:index]) in names for index in range(1,len(parts))): raise FormatError('WebData 文件与目录路径冲突。')
+    if not entries: raise FormatError('WebData 容器没有资源条目。')
+    return signature,entries,expanded
+
+
+def unpack_web_data(source: Path,output: Path,cancel=None):
+    signature,entries,total=web_data_entries(source,cancel)
+    output.mkdir(parents=True,exist_ok=False)
+    try:
+        with source.open('rb') as stream:
+            for name,offset,size in entries:
+                check_cancel(cancel); target=output/name; target.parent.mkdir(parents=True,exist_ok=True)
+                stream.seek(offset)
+                with target.open('xb') as destination:
+                    remaining=size
+                    while remaining:
+                        check_cancel(cancel); chunk=stream.read(min(1024*1024,remaining))
+                        if not chunk: raise FormatError('WebData 资源内容截断。')
+                        destination.write(chunk); remaining-=len(chunk)
+    except BaseException: shutil.rmtree(output,ignore_errors=True); raise
+    return {'decoder':'tuanjie-web-data' if signature.startswith(b'Tuanjie') else 'unity-web-data','files':len(entries),'bytes':total}
 
 
 def rc4(data: bytes, key: bytes) -> bytes:
@@ -219,6 +270,13 @@ def inspect_tree(root: Path) -> dict:
             with file.open('rb') as stream: blob=stream.read(128*1024 if file.suffix.lower() in ('.js','.json','.txt') else 4096)
             text=blob.decode('utf-8',errors='ignore')
             is_unity_header=blob.startswith((b'UnityFS\0',b'UnityRaw\0',b'UnityWeb\0'))
+            web_data_signature=next((value for value in WEB_DATA_SIGNATURES if blob.startswith(value)),None)
+            if web_data_signature:
+                try:
+                    web_data_entries(file)
+                    unity.append((relative,'Unity WebData 资源容器'))
+                    if web_data_signature.startswith(b'Tuanjie'): tuanjie.append((relative,'Tuanjie WebData 资源容器'))
+                except FormatError: pass
             serialized=False
             if not is_unity_header and len(blob)>=20:
                 metadata_size,total_size,format_version,data_offset=struct.unpack_from('>4I',blob)
