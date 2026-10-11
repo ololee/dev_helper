@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import mimetypes
 import os
 import re
 import tempfile
@@ -40,7 +41,7 @@ from web_assets import asset_path
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.6.3"
+VERSION = "2.7.0"
 
 
 def tool_result(value):
@@ -544,6 +545,8 @@ class Desktop:
             return JSONResponse({"error": str(error)[:400]}, 400)
 
     async def local_api(self, request: Request, path):
+        if path.startswith("/spine/"):
+            path = "/api/knowledge" + path
         if path.startswith("/api/workflows/"):
             return await self.workflow_api(request, path)
         if path == "/api/knowledge/status":
@@ -562,6 +565,16 @@ class Desktop:
                 return Response(status_code=405, headers={"Allow": "GET, HEAD"})
             name = path.rsplit("/", 1)[1]
             return FileResponse(asset_path(name), media_type="text/javascript" if name.endswith(".js") else "text/css")
+        if path.startswith("/api/knowledge/assets/spine/"):
+            if request.method not in ("GET", "HEAD"):
+                return Response(status_code=405, headers={"Allow": "GET, HEAD"})
+            name = path.removeprefix("/api/knowledge/assets/")
+            try:
+                file = asset_path(name)
+            except (ValueError, FileNotFoundError):
+                return JSONResponse({"error": "Spine asset not found"}, 404)
+            mime = "text/javascript" if name.endswith(".js") else mimetypes.guess_type(name)[0] or "application/octet-stream"
+            return FileResponse(file, media_type=mime, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"})
         body = None
         data = None
         if request.method in ("POST", "PUT", "PATCH"):
@@ -586,6 +599,12 @@ class Desktop:
         if response.data is not None:
             return JSONResponse(transform_paths(response.data, "mac"), response.status, headers=response.headers)
         return Response(response.body or b"", response.status, headers=response.headers, media_type=response.mime)
+
+    async def local_api_spine(self, request: Request):
+        try:
+            return await self.local_api(request, request.url.path)
+        except (ValueError, json.JSONDecodeError):
+            return JSONResponse({"error": "请求不是有效的 JSON。"}, 400)
 
     async def device_api(self, request: Request):
         device = request.path_params["device"]
@@ -794,10 +813,12 @@ class Desktop:
                                  background=BackgroundTask(response.aclose))
 
     async def device_ui(self, request):
-        from web_assets import render_knowledge_ui, render_notes_ui
+        from web_assets import render_knowledge_ui, render_notes_ui, render_spine_ui
         device = request.path_params["device"]
         if device not in ("mac", "android"):
             return Response(status_code=404)
+        if request.url.path.endswith("/spine"):
+            return HTMLResponse(render_spine_ui(device))
         source = render_notes_ui(device, self.shared_dir) if request.url.path.endswith("/notes") or request.url.path == "/notes" else render_knowledge_ui(device, self.shared_dir)
         if device == "android" and self.relay.enabled():
             # Lists/Markdown rendering must not prefetch recording bytes via relay.
@@ -818,14 +839,20 @@ class Desktop:
         async def notes(request):
             from web_assets import render_notes_ui
             return HTMLResponse(render_notes_ui("mac", self.shared_dir))
+        async def spine(request):
+            from web_assets import render_spine_ui
+            return HTMLResponse(render_spine_ui("mac"))
         return Starlette(lifespan=self.lifespan, routes=[
             Route("/", index),
             Route("/notes", notes),
+            Route("/spine", spine),
+            Route("/spine/{path:path}", self.local_api_spine, methods=["GET", "HEAD", "POST", "DELETE"]),
             Route("/health", self.api),
             Route("/mcp", McpEndpoint(), methods=["GET", "POST", "DELETE"]),
             Route("/api/{path:path}", self.api, methods=["GET", "HEAD", "POST", "DELETE"]),
             Route("/device-ui/{device}/", self.device_ui),
             Route("/device-ui/{device}/notes", self.device_ui),
+            Route("/device-ui/{device}/spine", self.device_ui),
             Route("/device-api/{device}/{path:path}", self.device_api, methods=["GET", "HEAD", "POST", "DELETE"]),
             Route("/tts/", self.tts_proxy, methods=["GET", "POST"]),
             Route("/tts/{path:path}", self.tts_proxy, methods=["GET", "HEAD", "POST"]),

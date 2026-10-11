@@ -2,6 +2,16 @@
 
 使用 Python 在 Mac 上运行同一套设备入口、笔记、记忆、Skills、向量、日程和资源管理。手机可以通过浏览器访问电脑，电脑也可以通过局域网调用已连接手机的 DevHelper。两端分别保存资料，选择设备决定这次查看哪一端；可开启资料同步，换电脑时从手机恢复。公开源码与私有资料分开保存。
 
+## 2.7.0 Spine 播放器
+
+在工作台点击「Spine」，或在当前服务地址后加 `/spine`。先选择「这台电脑」或已连接的手机，再导入 Spine ZIP 或包含骨架、图集与贴图的文件夹。资源按所选设备保存；通过电脑打开手机资源时，接口和贴图请求均指向所选手机。原 ZIP 作为附件保留，删除播放资源只删除已展开的资源包。
+
+支持 JSON、SKEL 和 Unity 常见的 `.json.txt`、`.skel.bytes`、`.atlas.txt` 后缀，按骨架版本自动加载内置 3.8、4.0、4.1、4.2、4.3 运行库。播放画布支持移动、缩放和复位；控制区提供动画、皮肤、播放／暂停、循环、速度、播放头、PMA、调试线与多轨道控制。没有可识别版本时可手动选择；已知不支持的主次版本会明确报错。无需 CDN 或新增 Node 环境。
+
+HTTP：先通过现有 `POST /api/knowledge/attachments/upload` 上传 ZIP，再用 `POST /api/knowledge/spine/import {attachmentId,name?}` 导入；列表 `GET /api/knowledge/spine/bundles`，详情／移除 `GET/DELETE /api/knowledge/spine/bundles/{id}`，资源 `GET/HEAD /api/knowledge/spine/bundles/{id}/files/{relativePath}`，支持 Range 下载。访问手机使用 `/device-api/{device}` 前缀，播放页为 `/device-ui/{device}/spine`。资源包内的脚本和 HTML 不会提供给播放器。
+
+导入处理有单次资源包保护边界：ZIP 256 MiB、展开后 512 MiB、每条 128 MiB、10000 条目，仅支持普通 STORE／DEFLATE ZIP；不设置资源库总数量或总容量配额。第三方 Spine 运行库不适用本项目 MIT 许可，具体许可与来源记录随 `static/spine/runtime` 一起提供，见 NOTICE。
+
 ## 2.6.3 录音倒计时
 
 点击开始录音后显示 3 → 2 → 1，每个数字 1 秒，结束后才真正开始录音。手机使用录音服务的统一倒计时，电脑浏览器在麦克风授权后倒计时，不会重复等待。倒计时可取消；离开录音页、切换设备或隐藏页面会取消尚未开始的录音，不生成空音频附件。录音计时从实际采集开始，已开始的手机录音可以继续后台录制。

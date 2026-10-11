@@ -9,11 +9,19 @@ import shutil
 import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
-CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'media.py', 'audio.py', 'sync.py',
+CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'media.py', 'audio.py', 'sync.py', 'spine.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
 ASSETS = ('knowledge.html', 'notes.html', 'motion.js', 'motion.css', 'vendor/markdown-it.min.js', 'vendor/markdown-it.LICENSE',
-          'vendor/markdown-it.provenance.json', 'vendor/README.md')
+          'vendor/markdown-it.provenance.json', 'vendor/README.md',
+          'spine/index.html', 'spine/player.html', 'spine/player-bootstrap.js',
+          'spine/spine-player.js', 'spine/spine-runtime.js', 'spine/spine-ui.js',
+          'spine/spine-ui.css', 'spine/zip-store.js', 'spine/runtime/provenance.json',
+          'spine/runtime/3.8/spine-webgl.js', 'spine/runtime/3.8/LICENSE',
+          'spine/runtime/4.0/spine-webgl.js', 'spine/runtime/4.0/LICENSE',
+          'spine/runtime/4.1/spine-webgl.js', 'spine/runtime/4.1/LICENSE',
+          'spine/runtime/4.2/spine-webgl.js', 'spine/runtime/4.2/LICENSE',
+          'spine/runtime/4.3/spine-webgl.js', 'spine/runtime/4.3/LICENSE')
 SKILL = ('SKILL.md', 'agents/openai.yaml', 'scripts/deploy.py')
 
 
@@ -32,6 +40,12 @@ def prepare(output: Path, skill_source: Path | None = None):
     for relative, path in files.items():
         if not path.is_file() or path.is_symlink():
             raise ValueError('A required public source file is missing or a symlink: ' + relative)
+    spine_provenance = json.loads(files['static/spine/runtime/provenance.json'].read_text())
+    for runtime in spine_provenance['runtimes']:
+        base = 'static/spine/runtime/' + runtime['id'] + '/'
+        for name, digest in (('spine-webgl.js', 'runtimeSha256'), ('LICENSE', 'licenseSha256')):
+            if hashlib.sha256(files[base + name].read_bytes()).hexdigest() != runtime[digest]:
+                raise ValueError('The Spine runtime or license differs from its recorded provenance: ' + base + name)
     # Validate the complete source list before writing any output. This cannot
     # descend into runtime data, virtualenvs, proof files or private documents.
     for relative, path in files.items():

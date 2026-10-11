@@ -1,0 +1,37 @@
+{
+  "source": "DevTools.zip provided by the user",
+  "sourceArchiveSha256": "e6a4e9b337112f5855cbdb2313e911c74a14da671594564458096573684e7186",
+  "upstream": "https://github.com/EsotericSoftware/spine-runtimes",
+  "runtimes": [
+    {
+      "id": "3.8",
+      "runtimeSha256": "4b108bad314c152bf0ff7a7f56fce5c98073f05a2bfa53e880d6c24b6f7c3aa5",
+      "licenseUrl": "https://raw.githubusercontent.com/EsotericSoftware/spine-runtimes/3.8/LICENSE",
+      "licenseSha256": "6142ee6cc2c03d3a918793e4750ae772bd3755c534d4a35e559e301acf51ec39"
+    },
+    {
+      "id": "4.0",
+      "runtimeSha256": "db31d4ff4d604ca9971f817427277607185b233158cbb4744409288c004a6d2b",
+      "licenseUrl": "https://raw.githubusercontent.com/EsotericSoftware/spine-runtimes/4.0/LICENSE",
+      "licenseSha256": "6142ee6cc2c03d3a918793e4750ae772bd3755c534d4a35e559e301acf51ec39"
+    },
+    {
+      "id": "4.1",
+      "runtimeSha256": "305b5f54f4f1ac238d3d59a0c2591416ac2dd95cb21e2b9f65b27066c607320f",
+      "licenseUrl": "https://raw.githubusercontent.com/EsotericSoftware/spine-runtimes/4.1/LICENSE",
+      "licenseSha256": "24f517153a2b090abc002972d4ec13f6aec3ac002c88d764b9067f2da1457a7e"
+    },
+    {
+      "id": "4.2",
+      "runtimeSha256": "9e495034588d2195c379422df37151a0750f79e2f4211434ca482520da3df6e0",
+      "licenseUrl": "https://raw.githubusercontent.com/EsotericSoftware/spine-runtimes/4.2/LICENSE",
+      "licenseSha256": "b9d50158f6c23a704d123fd0200cc00633a693ccf9b0aacb15e5d5b9cf6c0d58"
+    },
+    {
+      "id": "4.3",
+      "runtimeSha256": "fe05b399895cb4f5acaf00ca91724cbb5f6dba7972b53d4c7d5d9131fde5b018",
+      "licenseUrl": "https://raw.githubusercontent.com/EsotericSoftware/spine-runtimes/4.3/LICENSE",
+      "licenseSha256": "b9d50158f6c23a704d123fd0200cc00633a693ccf9b0aacb15e5d5b9cf6c0d58"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; form-action 'none'">
+<title>DevHelper · Spine 动画</title>
+<link rel="stylesheet" href="/api/knowledge/assets/spine/spine-ui.css">
+<script type="module" src="/api/knowledge/assets/spine/spine-ui.js"></script>
+</head>
+<body data-device="android">
+<div class="workbench">
+<header class="workspace-header"><div><h1>Spine 动画</h1><p>导入资源，查看动画、皮肤与混合效果。</p></div><button id="refresh" type="button">刷新资源</button></header>
+<div id="message" class="message" role="status" aria-live="polite" hidden></div>
+<div class="workspace">
+<aside class="library" aria-label="Spine 资源包">
+<div class="import-actions"><button id="choose-zip" type="button" class="primary">导入 ZIP</button><div class="import-secondary"><button id="choose-folder" type="button">选择目录</button><button id="choose-files" type="button">选择文件</button></div><p>目录或文件需包含 .json / .skel、.atlas 和图集图片。</p></div>
+<input id="zip-input" type="file" accept=".zip,application/zip" hidden><input id="folder-input" type="file" webkitdirectory multiple hidden><input id="files-input" type="file" accept=".json,.skel,.bytes,.atlas,.txt,.png,.jpg,.jpeg,.webp,.bmp" multiple hidden>
+<details id="existing"><summary>选择设备里的 ZIP</summary><div class="existing-panel"><div class="row"><button id="browse-files" type="button">浏览文件</button><button id="browse-attachments" type="button">已有附件</button></div><form id="directory-form"><label for="directory-path">文件目录</label><div class="row"><input id="directory-path" placeholder="默认共享目录" autocomplete="off" spellcheck="false"><button type="submit">打开</button></div></form><div id="existing-status" class="hint" role="status"></div><div id="existing-list"></div><div class="row"><button id="existing-parent" type="button" hidden>上一级</button><button id="existing-prev" type="button" hidden>上一页</button><button id="existing-next" type="button" hidden>下一页</button></div></div></details>
+<div class="library-title"><h2>已导入资源</h2><span id="bundle-count">0</span></div><div id="bundle-list" class="bundle-list"></div><p id="library-empty" class="library-empty">还没有 Spine 资源。导入一个 ZIP，或选择完整资源目录。</p>
+</aside>
+<section id="viewer" class="viewer" aria-label="动画预览台">
+<div class="viewer-heading"><div class="asset-heading"><strong id="asset-name">动画预览</strong><span id="asset-version">等待选择资源</span></div><div class="row"><button id="reset-view" type="button" title="恢复取景">适应画布</button><button id="fullscreen" type="button">全屏</button></div></div>
+<div class="canvas-wrap"><canvas id="spine-canvas" tabindex="0" aria-label="Spine 动画画布，可拖动平移、滚轮或双指缩放"></canvas><div id="canvas-empty" class="canvas-empty"><div><strong>让动画成为主角</strong><p>从左侧选择骨架开始预览。<br>拖动平移，滚轮或双指缩放。</p></div></div><div id="canvas-loading" class="canvas-loading" role="status" hidden>正在加载资源…</div><div class="canvas-help" aria-hidden="true">拖动平移 · 滚轮 / 双指缩放</div></div>
+<div class="controls">
+<div class="selection-row"><label>骨架<select id="skeleton-select" disabled><option>先选择资源包</option></select></label><label id="atlas-field" hidden>图集<select id="atlas-select"></select></label><label class="runtime-field">Spine 版本<select id="runtime-select"><option value="auto">自动识别</option><option value="3.8">3.8</option><option value="4.0">4.0</option><option value="4.1">4.1</option><option value="4.2">4.2</option><option value="4.3">4.3</option></select></label></div>
+<div class="playback-row"><button id="play" type="button" class="primary" disabled>暂停</button><label class="animation-field">动画<select id="animation-select" disabled><option>暂无动画</option></select></label><label>皮肤<select id="skin-select" disabled><option>暂无皮肤</option></select></label><label class="speed-field">速度<select id="speed-select"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="4">4×</option></select></label></div>
+<div class="timeline-row"><span id="time-current">0:00.0</span><input id="timeline" type="range" min="0" max="1" step="0.001" value="0" aria-label="动画进度" disabled><span id="time-duration">0:00.0</span></div>
+<div class="options-row"><label class="check"><input id="loop" type="checkbox" checked>循环播放</label><label class="check"><input id="pma" type="checkbox">预乘透明度</label><label class="check"><input id="debug" type="checkbox">显示骨骼</label><details id="track-details"><summary>轨道与混合</summary><div class="track-panel"><div class="row"><label>轨道<select id="track-select"><option value="0">0 · 主动画</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></label><label>混合时长（秒）<input id="mix" type="number" min="0" max="10" step="0.05" value="0.2"></label><button id="apply-animation" type="button" disabled>立即播放</button><button id="queue-animation" type="button" disabled>加入队列</button><button id="clear-track" type="button" disabled>清空轨道</button><button id="clear-tracks" type="button" disabled>全部清空</button></div><div id="track-list" class="hint">轨道为空</div></div></details></div>
+<p id="selection-note" class="selection-note" role="status"></p>
+</div>
+</section>
+</div>
+</div>
+</body>
+</html>

@@ -2,6 +2,14 @@ DevHelper Desktop
 
 The application source is provided under the MIT License (see LICENSE).
 
+Spine WebGL runtimes 3.8, 4.0, 4.1, 4.2 and 4.3 are separately licensed by
+Esoteric Software under the Spine Runtimes License, not this application's MIT
+License. The unmodified runtime bundles extracted from the user-provided
+DevTools.zip, corresponding upstream licenses, and SHA-256 provenance are
+included in static/spine/runtime/<version>/ and
+static/spine/runtime/provenance.json. See each runtime's LICENSE for its terms.
+Upstream: https://github.com/EsotericSoftware/spine-runtimes
+
 Offline Markdown previews bundle markdown-it 15.0.2, an MIT-licensed browser
 artifact. Its original license, exact source provenance and bundle hash are
 included in static/vendor/markdown-it.LICENSE and

@@ -10,6 +10,16 @@ from typing import Literal
 
 Device = Literal["mac", "android"]
 HERE = Path(__file__).resolve().parent
+SPINE_ASSETS = (
+    "spine/index.html", "spine/player.html", "spine/player-bootstrap.js",
+    "spine/spine-player.js", "spine/spine-runtime.js", "spine/spine-ui.js",
+    "spine/spine-ui.css", "spine/zip-store.js", "spine/runtime/provenance.json",
+    "spine/runtime/3.8/spine-webgl.js", "spine/runtime/3.8/LICENSE",
+    "spine/runtime/4.0/spine-webgl.js", "spine/runtime/4.0/LICENSE",
+    "spine/runtime/4.1/spine-webgl.js", "spine/runtime/4.1/LICENSE",
+    "spine/runtime/4.2/spine-webgl.js", "spine/runtime/4.2/LICENSE",
+    "spine/runtime/4.3/spine-webgl.js", "spine/runtime/4.3/LICENSE",
+)
 
 
 def decorate_tts_html(source: bytes) -> bytes:
@@ -27,7 +37,7 @@ def decorate_tts_html(source: bytes) -> bytes:
 
 def asset_path(name: str) -> Path:
     """Prefer bundled release assets, with the Android checkout as dev fallback."""
-    if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md"):
+    if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md", *SPINE_ASSETS):
         raise ValueError("Unknown DevHelper asset")
     packaged = HERE / "static" / name
     if packaged.is_file():
@@ -166,3 +176,12 @@ def render_notes_ui(device: Device, shared_dir: Path | None = None) -> str:
     source = asset_path("notes.html").read_text(encoding="utf-8")
     source = _replace_required(source, "const ORIGIN='android';", f"const ORIGIN='{device}';")
     return _scope_paths(source, device)
+
+
+def render_spine_ui(device: Device | None = None) -> str:
+    """Serve the shared Spine workbench and scope local resources to one device."""
+    if device not in (None, "mac", "android"):
+        raise ValueError("Unknown device; choose mac or android")
+    source = asset_path("spine/index.html").read_text(encoding="utf-8")
+    source = _replace_required(source, 'data-device="android"', f'data-device="{device or "mac"}"')
+    return _scope_paths(source, device) if device else source

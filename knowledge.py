@@ -153,6 +153,8 @@ def _name(value: str, fallback: str = "media") -> str:
 
 
 def _sniff(header: bytes, declared: str = "") -> tuple[str, str, str]:
+    if header.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        return "application/zip", "archive", "zip"
     if len(header) >= 12 and header[:4] in (b"RIFF", b"RF64") and header[8:12] == b"WAVE":
         return "audio/wav", "audio", "wav"
     if header.startswith(b"fLaC"):
@@ -194,7 +196,7 @@ def _sniff(header: bytes, declared: str = "") -> tuple[str, str, str]:
         if declared == "audio/webm":
             return "audio/webm", "audio", "webm"
         return "video/webm", "video", "webm"
-    raise KnowledgeError("Unsupported media; choose an image, video or WAV, MP3, M4A, AAC, FLAC, Ogg or WebM audio")
+    raise KnowledgeError("Unsupported file; choose an image, video, audio or Spine ZIP archive")
 
 
 class KnowledgeService:
@@ -242,6 +244,11 @@ class KnowledgeService:
             from audio import DesktopAudioEditor
         self.video_editor = DesktopVideoEditor(self)
         self.audio_editor = DesktopAudioEditor(self)
+        if __package__:
+            from .spine import SpineStore
+        else:
+            from spine import SpineStore
+        self.spine = SpineStore(self)
         self._recover_schedules()
 
     def close(self) -> None:
@@ -817,7 +824,7 @@ class KnowledgeService:
                 prefix.extend(chunk)
             header = bytes(prefix)
             declared_mime = mime.lower().split(";", 1)[0]
-            declared_mime = {"audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/x-flac": "audio/flac", "application/ogg": "audio/ogg"}.get(declared_mime, declared_mime)
+            declared_mime = {"audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/x-flac": "audio/flac", "application/ogg": "audio/ogg", "application/x-zip-compressed": "application/zip"}.get(declared_mime, declared_mime)
             detected_mime, kind, extension = _sniff(header, declared_mime)
             compatible_heif = {declared_mime, detected_mime} <= {"image/heic", "image/heif"}
             if declared_mime != "application/octet-stream" and declared_mime != detected_mime and not compatible_heif:
@@ -1014,6 +1021,8 @@ class KnowledgeService:
             except (ValueError, TypeError):
                 raise KnowledgeError(f"{key} must be an integer") from None
         try:
+            if route.startswith("spine/"):
+                return self.spine.handle(method, route[len("spine/"):], data)
             if route == "sync/manifest" and method == "GET":
                 return Response(data=self.sync_manifest())
             if route.startswith("sync/records/") and method == "GET":
@@ -1066,7 +1075,7 @@ class KnowledgeService:
                 raw_length = headers.get("content-length")
                 length = int(raw_length) if raw_length is not None else None
                 if body is None:
-                    raise KnowledgeError("Upload one image, video or audio as a raw request body")
+                    raise KnowledgeError("Upload one image, video, audio or Spine ZIP as a raw request body")
                 return Response(data=self.import_attachment(body, query.get("name", "media"), headers.get("content-type", "application/octet-stream").split(";", 1)[0], length))
             elif route.startswith("attachments/"):
                 parts = route[12:].split("/")
