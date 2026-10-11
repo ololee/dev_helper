@@ -2,6 +2,32 @@
 
 使用 Python 在 Mac 上运行同一套设备入口、笔记、记忆、Skills、向量、日程和资源管理。手机可以通过浏览器访问电脑，电脑也可以通过局域网调用已连接手机的 DevHelper。两端分别保存资料，选择设备决定这次查看哪一端；可开启资料同步，换电脑时从手机恢复。公开源码与私有资料分开保存。
 
+## 2.8.0 小游戏与 Unity／团结资源
+
+工作台点击「小游戏」，或打开 `/minigames`。手机原生入口为「素材 → 小游戏管理」。列表来自本机缓存扫描和手动导入，支持抖音、微信的 AppID、名称与版本对应、手动补名称以及引擎证据；不是平台全量商店目录。哈希文件名不当作 AppID，未知名称和引擎会明确显示。H5 是部署方式，Wasm 文件本身不能确定 Unity。
+
+手机按系统提供的宿主数据目录扫描小游戏缓存，只读取小游戏目录与元信息，原缓存保留。原包 ZIP 可手动保存或传给电脑。抖音 TPKG v2 解包器使用指定宿主版本的 RC4 密钥派生；版本或加密规则变化会明确报错，不宣称支持所有抖音版本。电脑同时支持明文 WXAPKG；微信加密包保留原包，不进行账号密钥绕过。Cocos 导出包含原包、解包文件、素材三种模式，保留相对目录和 cacheList 的 URL 映射，已有标准 Spine 骨架／图集／纹理可直接打开内置播放器。压缩纹理或 Cocos 自定义序列化数据不保证自动恢复成可播放 Spine。
+
+Unity／团结完整导出在电脑运行。界面可配置已有 AssetRipper-CLI，或明确点击安装：固定上游源码版本，使用 .NET 10 构建当前 macOS/Windows 架构的执行程序；生成后为独立运行程序。可选下载私有 .NET SDK，团结转换依赖私有 Python 环境内的 UnityPy 1.25.3。不会把这些二进制、缓存、游戏资源或用户资料放进公开源码。上游源码、GPL 许可与第三方说明留在工具的私有安装目录。本机已实测 macOS ARM64；Windows 有运行架构与参数验证，尚未进行 Windows 设备实测。
+
+团结识别依据含 `2022.3.*t*` 的实际版本与资源头；没有足够依据时显示「Unity／团结未区分」。已适配含类型树的团结 2022.3 资源，将对象按标准 Unity 类型树重新编码，保留 PathID 与对象引用，并规范包头；不是只替换版本字符串。无类型树、ACL 动画和微信流式纹理扩展会明确拒绝，不生成假成功。输出是重建项目，不能保证恢复原始源码、编辑器设置和全部依赖。
+
+处理在后台任务执行，支持取消、阶段进度、ZIP/单文件下载和重启后的中断提示。导出与单独「DeepSeek 归纳」可明确选择发送素材清单进行分类整理；二进制资源保留本机。AI 失败仍保留已导出的素材，提示重试。任务完成通知沿用手机设置、响铃／震动和勿扰规则，离线或提醒被抑制时不声称已响铃。电脑页面显示任务进度和完成提示。
+
+HTTP 入口为 `/api/knowledge/minigames`：`GET games`、`GET games/{id}`、`POST scan`、`POST import {attachmentId,platform?,name?}`、`POST export {gameId,mode,summarize?,notify?}`、`GET jobs/{id}`、`POST jobs/{id}/cancel`、`GET exports/{id}/archive`、`GET exports/{id}/files`、`POST exports/{id}/spine`、`POST exports/{id}/summarize`。选设备使用既有 `/device-api/{mac|android}` 路由，接口基于 HTTP，与 ADB 无关。电脑接收的是用户手动传送的游戏 ZIP；素材不会自动上传云端。
+
+HTTP MCP 的 `devhelper_minigame_*` 提供列表、扫描、导入、导出、查询／取消任务、名称编辑、Spine、归纳及工具安装／配置。手机对应工具由 `devhelper_list_tools(device="android")` 读取。CLI 示例（在源码目录）：
+
+```bash
+python -m assetripper status
+python -m assetripper setup --install-dotnet
+python -m assetripper export --input /path/to/game --output /path/to/new-output --variant auto
+python -m minigames --data /path/to/private-library import game.zip --platform douyin
+python -m minigames --data /path/to/private-library export GAME_UUID --mode assets
+```
+
+Python 调用 `AssetRipperAdapter(private_root).export([Path(input)], Path(new_output), variant="auto")`，或 `MiniGameService(private_root).import_archive(Path(zip))`／`export({...})` 后查询 `job(id)`。不覆盖原件和已有非空输出目录；调用结束需 `MiniGameService.close()`。
+
 ## 2.7.0 Spine 播放器
 
 在工作台点击「Spine」，或在当前服务地址后加 `/spine`。先选择「这台电脑」或已连接的手机，再导入 Spine ZIP 或包含骨架、图集与贴图的文件夹。资源按所选设备保存；通过电脑打开手机资源时，接口和贴图请求均指向所选手机。原 ZIP 作为附件保留，删除播放资源只删除已展开的资源包。

@@ -75,7 +75,10 @@ function selectBundle(bundle) {
   const skeletons = bundle?.skeletons || [];
   setOptions($('skeleton-select'), skeletons.map(item => ({ value: item.skeleton, label: item.name || item.skeleton })), skeletons.length ? '' : '资源包没有骨架');
   $('skeleton-select').disabled = !skeletons.length;
-  selectSkeleton(skeletons[0] || null);
+  const requested = new URLSearchParams(location.search).get('skeleton');
+  const selected = skeletons.find(item => item.skeleton === requested) || skeletons[0] || null;
+  if (selected) $('skeleton-select').value = selected.skeleton;
+  selectSkeleton(selected);
 }
 
 function selectSkeleton(skeleton) {
@@ -269,4 +272,5 @@ $('directory-form').addEventListener('submit', event => { event.preventDefault()
 $('existing-parent').addEventListener('click', () => browseExisting('files', 0, ui.existingParent));
 $('existing-prev').addEventListener('click', () => browseExisting(ui.existingMode, Math.max(0, ui.existingOffset - 40)));
 $('existing-next').addEventListener('click', () => browseExisting(ui.existingMode, ui.existingOffset + 40));
-refreshBundles();
+const initialBundle = new URLSearchParams(location.search).get('entry');
+refreshBundles(initialBundle && uuid.test(initialBundle) ? initialBundle : undefined);

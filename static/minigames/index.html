@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="light"><title>DevHelper · 小游戏</title>
+<link rel="stylesheet" href="/api/knowledge/assets/minigames/minigames-ui.css">
+<script type="module" src="/api/knowledge/assets/minigames/minigames-ui.js"></script>
+</head>
+<body data-device="android">
+<main class="workbench">
+<header class="workspace-header"><div><h1>小游戏</h1><p id="device-hint">查看缓存，按游戏整理资源。</p></div><div class="row"><button id="refresh" type="button">刷新列表</button><button id="choose-zip" type="button">导入 ZIP</button></div></header>
+<div id="message" class="message" role="status" aria-live="polite" hidden></div>
+<input id="zip-input" type="file" accept=".zip,application/zip" hidden>
+<div class="workspace">
+<aside class="library" aria-label="游戏列表">
+<div class="library-controls"><label for="platform">平台</label><div class="row"><select id="platform"><option value="douyin">抖音</option><option value="wechat">微信</option><option value="all">全部平台</option></select><button id="scan" class="primary" type="button">扫描缓存</button></div><label class="search-label" for="search">查找当前页</label><input id="search" type="search" placeholder="游戏名或 ID" autocomplete="off"><p id="scan-hint" class="hint">扫描只读取当前设备已有的游戏缓存。</p></div>
+<div class="library-heading"><h2>游戏列表</h2><span id="game-count" class="hint">正在读取</span></div>
+<div id="game-list" class="game-list"></div><div id="library-empty" class="empty small" hidden><strong>还没有找到游戏</strong><p>从电脑导入已有游戏 ZIP，或扫描手机缓存。</p></div>
+<div class="pagination"><button id="previous" type="button" disabled>上一页</button><span id="page-label" class="hint">第 1 页</span><button id="next" type="button" disabled>下一页</button></div>
+</aside>
+<div class="main-column">
+<section class="detail" aria-label="游戏详情" aria-busy="false">
+<div id="detail-empty" class="empty detail-empty"><div class="game-symbol" aria-hidden="true">▧</div><strong>选择一个游戏</strong><p>查看 ID、包版本和引擎线索，再选择导出方式。</p></div>
+<div id="detail-content" hidden>
+<div class="detail-heading"><div><h2 id="game-name">游戏详情</h2><p id="game-id" class="identifier"></p></div><span id="engine-badge" class="badge">未识别引擎</span></div>
+<div id="detail-loading" class="hint" role="status" hidden>正在读取详情…</div>
+<dl id="game-facts" class="game-facts"></dl>
+<form id="name-form" class="name-form"><label for="name-input">游戏名称</label><div class="row"><input id="name-input" maxlength="150" placeholder="未知名称，可手动补充" autocomplete="off"><button id="save-name" type="submit">保存名称</button></div></form>
+<div id="game-issues" class="issues" hidden></div>
+<details class="evidence"><summary>引擎识别依据</summary><p id="engine-note" class="hint"></p><ul id="evidence-list"></ul></details>
+<section class="export-section" aria-labelledby="export-title"><div class="section-heading"><h3 id="export-title">导出游戏</h3><span id="export-device" class="hint"></span></div><div id="export-modes" class="export-modes"></div><p id="export-note" class="hint"></p><div class="export-options"><label class="check"><input id="summarize" type="checkbox">完成后用 DeepSeek 归纳</label><label class="check"><input id="notify" type="checkbox" checked>完成时提醒</label></div><button id="start-export" class="primary" type="button" disabled>开始导出</button></section>
+<section class="exports-section" aria-labelledby="exports-title"><div class="section-heading"><h3 id="exports-title">已导出结果</h3><span id="export-count" class="hint">0</span></div><div id="export-list"></div><p id="exports-empty" class="hint">导出完成后，可以下载 ZIP、打开 Spine 或归纳内容。</p></section>
+</div>
+</section>
+<section class="tasks" aria-labelledby="tasks-title"><div class="section-heading"><h2 id="tasks-title">任务进度</h2><span id="task-count" class="hint">暂无任务</span></div><div id="task-list" aria-live="polite"></div><p id="tasks-empty" class="hint">扫描、导入和导出都在后台执行，可在这里查看结果。</p></section>
+<details id="assetripper" class="tool-settings"><summary>Unity 项目导出工具</summary><p class="hint">AssetRipper 在这台电脑处理 Unity 资源。工具是否可用、配置路径和安装内容会先显示在这里。</p><p id="assetripper-status" class="hint" role="status">尚未检查</p><button id="assetripper-check" type="button">检查 AssetRipper</button><div id="assetripper-config" hidden></div></details>
+</div>
+</div>
+</main>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

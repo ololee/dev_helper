@@ -5,6 +5,8 @@ description: 在已接入 DevHelper HTTP MCP 的工程里读取手机或电脑�
 
 # 在当前工程使用 DevHelper
 
+用户研究小游戏时，先列出当前设备工具 schema。电脑的 `devhelper_minigame_*` 支持导入、识别、导出与后台任务；手机的 `minigame_*` 扫描宿主小游戏缓存，支持抖音 TPKG v2 的本地解包／素材导出。AppID 和名称只依据实际元信息，不能把哈希包名当 ID。Unity／团结项目导出在电脑端，通过用户明确选择传送的原包处理；不默认传输全部手机缓存。导出排队后查询 job，只有 completed 才报告成功。Spine 返回打开地址，缺图集、纹理或不支持版本需明确说明。资源归纳使用用户明确选中的素材清单发送 DeepSeek，不自动上传二进制或执行包内脚本。完成提醒遵循下文已有规则。
+
 工程中的 `devhelper` MCP 指向已运行的 DevHelper，使用 Streamable HTTP。先查看当前会话的 MCP 工具是否可用；缺少工具时提示重新打开工程，并在客户端完成正常的工程信任或 MCP 批准步骤。不要通过 shell 绕过客户端的工具批准，也不要启动 stdio 或 ADB 来替代这个连接。
 
 先查看当前连接提供的工具：电脑版入口提供 `devhelper_list_devices`，直接手机入口提供 `knowledge_status`，用实际存在的工具获取设备状态和地址。本机资料可通过 `knowledge_get_context` 或 `knowledge://bootstrap` 读取。通过电脑版连接且手机在线时，先用 `devhelper_list_tools` 查看手机工具的实际参数，再通过 `devhelper_call_tool`，指定 `device=android`、`name=knowledge_get_context`，读取手机启用且自动加载的记忆与私有 Skills。直接连接手机 MCP 时，使用它实际提供的 `knowledge_get_context`。离线状态要如实说明，不把电脑旧副本称作已经同步的手机最新内容。

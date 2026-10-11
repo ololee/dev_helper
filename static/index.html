@@ -21,6 +21,7 @@
 @media(max-width:720px){.shell{margin:0;padding:0 16px 96px;min-width:0}.header{flex-direction:row;flex-wrap:nowrap;align-items:center;height:64px;min-height:64px;margin-bottom:24px;justify-content:space-between;gap:8px}.brand{position:static;width:auto;height:auto;padding:0;gap:8px}.brand-name{font-size:15px}.brand-subtitle{display:none}.mark{width:28px;height:28px;border-radius:7px;font-size:16px}.header-actions{gap:8px;width:auto;flex-wrap:nowrap}.device-picker>span{display:none}.device-picker select{min-width:0;max-width:144px;padding:8px;font-size:11px}.header-actions>button{font-size:11px;padding:8px}.tabs{position:fixed;inset:auto 0 0;width:100%;height:calc(64px + env(safe-area-inset-bottom));padding:4px 8px env(safe-area-inset-bottom);display:flex;flex-direction:row;align-items:stretch;gap:4px;border-top:1px solid var(--line);border-right:0;z-index:8;overflow-x:auto}.tabs{scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.tabs button{flex-direction:column;justify-content:center;gap:4px;min-width:72px;padding:6px 8px;min-height:56px;font-size:10px;border-radius:8px}.tabs svg{width:18px;height:18px}.intro{gap:12px}.intro h1{font-size:22px}.intro p{font-size:12px}.panel{padding:16px;border-radius:10px}.device-grid{grid-template-columns:1fr;gap:16px}#device-cards .device-card{grid-template-columns:minmax(0,1fr) 104px;padding:16px;gap:12px}.device-head{grid-column:1;grid-row:1;flex-direction:row;align-items:center;justify-content:space-between}.device-title{gap:8px}.device-card>.address{grid-column:1;grid-row:2}.capabilities{grid-column:1;grid-row:3}.device-actions{grid-column:2;grid-row:1/4}.device-name{font-size:13px}.device-platform{display:none}.device-head>.badge{font-size:10px}.capability{font-size:10px}.quick-links{margin-top:16px}.quick-link{padding:16px;gap:12px}.quick-link span{display:none}.quick-link strong{margin:0;font-size:12px}.workspace-toolbar{flex-wrap:wrap}.app-frame{height:calc(100dvh - 210px);min-height:480px}.clipboard-layout{grid-template-columns:1fr;gap:16px}.clipboard-text{min-height:260px}.modal-backdrop{padding:16px}.modal{padding:20px;max-height:calc(100dvh - 32px);overflow:auto}.clipboard-actions .primary{margin-left:0}.workspace-heading h2{font-size:16px}.knowledge-sync-layout{gap:16px}.sync-results{grid-template-columns:repeat(3,minmax(0,1fr))}.sync-result-number{font-size:24px}.frame-empty{min-height:320px;padding:32px 16px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
+.minigames-home-entry{margin-top:16px;width:100%;border:1px solid var(--line);border-radius:12px;background:#fff;padding:18px 24px}.minigames-home-entry span{display:block}.minigames-home-entry strong{font-size:13px}.minigames-home-entry svg{color:var(--green)}
 </style>
 <link rel="stylesheet" href="/api/knowledge/assets/motion.css">
 <script src="/api/knowledge/assets/motion.js" defer></script>
@@ -39,6 +40,7 @@
     <button id="tab-ai" type="button" role="tab" aria-selected="false" aria-controls="page-ai" data-page="ai" tabindex="-1"><svg aria-hidden="true"><use href="#icon-memory"/></svg>AI 助手</button>
     <button id="tab-sync" type="button" role="tab" aria-selected="false" aria-controls="page-sync" data-page="sync" tabindex="-1"><svg aria-hidden="true"><use href="#icon-sync"/></svg>资料同步</button>
     <button id="tab-spine" type="button" role="tab" aria-selected="false" aria-controls="page-spine" data-page="spine" tabindex="-1"><svg aria-hidden="true"><use href="#icon-skill"/></svg>Spine 动画</button>
+    <button id="tab-minigames" type="button" role="tab" aria-selected="false" aria-controls="page-minigames" data-page="minigames" tabindex="-1"><svg aria-hidden="true"><use href="#icon-grid"/></svg>小游戏</button>
     <button id="tab-tts" type="button" role="tab" aria-selected="false" aria-controls="page-tts" data-page="tts" tabindex="-1"><svg aria-hidden="true"><use href="#icon-voice"/></svg>语音</button>
     <button id="tab-clipboard" type="button" role="tab" aria-selected="false" aria-controls="page-clipboard" data-page="clipboard" tabindex="-1"><svg aria-hidden="true"><use href="#icon-clipboard"/></svg>共享剪贴板</button>
     <button id="tab-relay" type="button" role="tab" aria-selected="false" aria-controls="page-relay" data-page="relay" tabindex="-1"><svg aria-hidden="true"><use href="#icon-link"/></svg>中转与传输</button>
@@ -78,6 +80,7 @@
         <button type="button" class="quick-link" data-section="resources"><svg aria-hidden="true"><use href="#icon-folder"/></svg><div><strong>资源与文件</strong><span>管理媒体附件与设备文件</span></div></button>
         <button type="button" class="quick-link" data-section="schedules"><svg aria-hidden="true"><use href="#icon-clock"/></svg><div><strong>日程</strong><span>管理定时执行的工具任务</span></div></button>
       </div>
+      <button type="button" class="quick-link minigames-home-entry" data-open-minigames="true"><svg aria-hidden="true"><use href="#icon-grid"/></svg><div><strong>小游戏管理</strong><span>扫描抖音／微信缓存，导出代码、资源与 Spine 动画</span></div></button>
       <div class="workbench-footer"><p class="hint">资料保存在所选设备。切换设备即可查看对应内容。</p><div class="row"><span id="last-check" class="page-status" role="status"></span><button id="devices-refresh" type="button" class="ghost">刷新设备</button></div></div>
     </section>
     <section id="page-library" role="tabpanel" aria-labelledby="tab-library" hidden>
@@ -106,6 +109,10 @@
       <div class="workspace-toolbar"><div class="workspace-heading"><h2>语音助手</h2><p>在电脑生成语音，手机和电脑都能输入、试听与下载。</p></div><button id="tts-reload" type="button" class="ghost">重新加载</button></div>
       <div class="frame-shell"><div id="tts-loading" class="frame-loading" role="status" hidden>正在打开语音助手…</div><iframe id="frame-tts" class="app-frame" title="语音助手" allow="autoplay"></iframe></div>
     </section>
+    <section id="page-minigames" role="tabpanel" aria-labelledby="tab-minigames" hidden>
+      <div class="workspace-toolbar"><div class="workspace-heading"><h2 id="minigames-title">这台电脑的小游戏</h2><span id="minigames-online" class="badge">尚未连接</span><p>扫描游戏缓存，导出包内容与资源</p></div><button id="minigames-reload" type="button" class="ghost">重新加载</button></div>
+      <div class="frame-shell"><div id="minigames-empty" class="frame-empty"><div><h2>设备尚未连接</h2><p>连接当前设备后，可以扫描小游戏缓存或导入游戏 ZIP。</p><button id="minigames-connect" type="button" class="primary">检查连接</button></div></div><div id="minigames-loading" class="frame-loading" role="status" hidden>正在打开小游戏管理…</div><iframe id="frame-minigames-mac" class="app-frame" title="这台电脑的小游戏管理" hidden></iframe><iframe id="frame-minigames-android" class="app-frame" title="Android 手机的小游戏管理" hidden></iframe></div>
+    </section>
     <section id="page-clipboard" role="tabpanel" aria-labelledby="tab-clipboard" hidden>
       <div class="intro"><div><h1>共享剪贴板</h1><p>读取一端的剪贴板，或输入文字发送到设备。</p></div></div>
       <div id="clipboard-error" class="message" role="alert" hidden></div><div class="field"><label for="clipboard-transport">手机传输通道</label><select id="clipboard-transport"><option value="auto">自动选择</option><option value="lan">局域网</option><option value="relay">中转服务器</option></select></div>
@@ -122,7 +129,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const state = {page:'home', device:'mac', devices:[], config:{androidUrl:'',autoClipboardSync:false}, loaded:{mac:false,android:false,tts:false},aiLoaded:{mac:false,android:false},notesLoaded:{mac:false,android:false},spineLoaded:{mac:false,android:false}, pendingSection:{mac:null,android:null}, clipboardBusy:false, clipboardDirty:false, clipboardRequest:0, devicesRequest:0, configRequest:0, configReady:false, loadingDevices:true, lastDevicesError:'', modalFocus:null, knowledgeSync:null,knowledgeSyncBusy:false,knowledgeSyncLoading:false,knowledgeSyncRequest:0};
+  const state = {page:'home', device:'mac', devices:[], config:{androidUrl:'',autoClipboardSync:false}, loaded:{mac:false,android:false,tts:false},aiLoaded:{mac:false,android:false},notesLoaded:{mac:false,android:false},spineLoaded:{mac:false,android:false},minigamesLoaded:{mac:false,android:false}, pendingSection:{mac:null,android:null}, clipboardBusy:false, clipboardDirty:false, clipboardRequest:0, devicesRequest:0, configRequest:0, configReady:false, loadingDevices:true, lastDevicesError:'', modalFocus:null, knowledgeSync:null,knowledgeSyncBusy:false,knowledgeSyncLoading:false,knowledgeSyncRequest:0};
   const capabilityLabels = {clipboard:'剪贴板',clipboard_read:'读取剪贴板',clipboard_write:'写入剪贴板',clipboard_sync:'共享剪贴板',knowledge:'资料管理',memory:'记忆',notes:'笔记',audio:'录音',workflows:'任务助手',skills:'Skills',skill:'Skills',rag:'向量检索',vectors:'向量检索',schedules:'日程',schedule:'日程',resources:'资源管理',files:'文件',file_browse:'文件浏览',media:'媒体处理',media_edit:'媒体编辑',tts:'语音生成',root:'Root 操作',capture:'截屏与录屏',mediaEditing:'媒体编辑',touch:'触摸',screenshot:'截屏',screen_recording:'录屏',recording:'录屏',camera:'摄像头',shell:'命令执行',launch_app:'打开应用',http_mcp:'HTTP MCP',mcp:'MCP 工具'};
   let toastTimer;
   function make(tag, className, text) {const element=document.createElement(tag);if(className)element.className=className;if(text!==undefined)element.textContent=String(text);return element;}
@@ -153,7 +160,7 @@
     }
     for(const option of $('device-select').options){const item=device(option.value);option.textContent=deviceName(option.value)+(item?.online?' · 在线':item?' · 未连接':'');}
     const count=state.devices.filter(item=>item.online===true).length;$('online-count').replaceChildren(make('span','dot'),document.createTextNode(state.loadingDevices&&!state.devices.length?'正在检查设备':count+' 台设备在线'));$('online-count').classList.toggle('online',count>0);
-    renderLibrary();renderNotesFrame();renderSpineFrame();
+    renderLibrary();renderNotesFrame();renderSpineFrame();renderMinigamesFrame();
   }
   async function refreshDevices() {
     const request=++state.devicesRequest;state.loadingDevices=true;$('devices-refresh').disabled=true;
@@ -165,17 +172,17 @@
   function openPage(page) {
     state.page=page;
     for(const button of document.querySelectorAll('[data-page]')){const current=button.dataset.page===page;button.setAttribute('aria-selected',String(current));button.tabIndex=current?0:-1;}
-    for(const name of ['home','library','notes','ai','sync','spine','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
-    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',ai:'AI 助手',sync:'资料同步',spine:'Spine 动画',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
+    for(const name of ['home','library','notes','ai','sync','spine','minigames','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
+    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',ai:'AI 助手',sync:'资料同步',spine:'Spine 动画',minigames:'小游戏',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
     $('tab-'+page).scrollIntoView({block:'nearest',inline:'nearest'});
     if(page==='library')renderLibrary();
-    if(page==='notes')renderNotesFrame();if(page==='ai')renderAiFrame();renderSpineFrame();
+    if(page==='notes')renderNotesFrame();if(page==='ai')renderAiFrame();renderSpineFrame();renderMinigamesFrame();
     if(page==='tts'&&!state.loaded.tts){state.loaded.tts=true;$('tts-loading').hidden=false;$('frame-tts').src='/tts/';}
     if(page==='clipboard'&&!state.clipboardDirty)readClipboard();
     if(page==='sync')loadKnowledgeSync();
     if(page==='relay')loadRelay();
   }
-  function selectDevice(id) {if(!['mac','android'].includes(id))return;state.device=id;$('device-select').value=id;renderLibrary();renderNotesFrame();renderSpineFrame();if(state.page==='ai')renderAiFrame();}
+  function selectDevice(id) {if(!['mac','android'].includes(id))return;state.device=id;$('device-select').value=id;renderLibrary();renderNotesFrame();renderSpineFrame();renderMinigamesFrame();if(state.page==='ai')renderAiFrame();}
   function applyLibrarySection(id) {const section=state.pendingSection[id];if(!section)return;const frame=$('frame-'+id);try{const button=frame.contentDocument?.getElementById('tab-'+section);if(button){button.click();state.pendingSection[id]=null;}}catch{/* A proxy loading error will be shown inside the frame. */}}
   function renderLibrary() {
     const item=device(),online=item?.online===true;$('library-title').textContent=deviceName()+'的资料';$('library-online').textContent=online?'在线':state.loadingDevices?'检查中':'未连接';$('library-online').classList.toggle('online',online);
@@ -196,6 +203,19 @@
     if(state.page==='spine'&&online&&!state.spineLoaded[state.device]){state.spineLoaded[state.device]=true;$('spine-loading').hidden=false;$('frame-spine-'+state.device).src='/device-ui/'+state.device+'/spine';}
   }
   function renderAiFrame(){for(const id of ['mac','android'])$('frame-ai-'+id).hidden=id!==state.device;if(!state.aiLoaded[state.device]){state.aiLoaded[state.device]=true;$('frame-ai-'+state.device).src='/device-ui/'+state.device+'/notes#ai';}}
+  function renderMinigamesFrame() {
+    const online=device()?.online===true;$('minigames-title').textContent=deviceName()+'的小游戏';$('minigames-online').textContent=online?'在线':state.loadingDevices?'检查中':'未连接';$('minigames-online').classList.toggle('online',online);$('minigames-empty').hidden=online;
+    for(const id of ['mac','android']){const frame=$('frame-minigames-'+id),visible=state.page==='minigames'&&id===state.device&&online;frame.hidden=id!==state.device||!online;if(state.minigamesLoaded[id])frame.contentWindow?.postMessage({type:'devhelper.minigames-visibility',visible},window.location.origin);}
+    if(state.page==='minigames'&&online&&!state.minigamesLoaded[state.device]){state.minigamesLoaded[state.device]=true;$('minigames-loading').hidden=false;$('frame-minigames-'+state.device).src='/device-ui/'+state.device+'/minigames';}
+  }
+  function handleMinigamesMessage(event) {
+    if(event.origin!==window.location.origin||!['devhelper.minigames-spine','devhelper.minigames-open'].includes(event.data?.type))return;
+    const source=['mac','android'].find(id=>event.source===$('frame-minigames-'+id).contentWindow);if(!source||!['mac','android'].includes(event.data.device))return;
+    const id=event.data.device,spine=event.data.type==='devhelper.minigames-spine';let url;try{url=new URL(event.data.url,window.location.origin);}catch{return;}
+    if(url.origin!==window.location.origin||url.pathname!=='/device-ui/'+id+'/'+(spine?'spine':'minigames'))return;
+    selectDevice(id);openPage(spine?'spine':'minigames');state[spine?'spineLoaded':'minigamesLoaded'][id]=true;$(spine?'spine-loading':'minigames-loading').hidden=false;$('frame-'+(spine?'spine-':'minigames-')+id).src=url.pathname+url.search+url.hash;
+  }
+  window.addEventListener('message',handleMinigamesMessage);
   function aiDirty(id){try{return state.aiLoaded[id]&&typeof $('frame-ai-'+id).contentWindow?.hasUnsavedKnowledgeChanges==='function'&&$('frame-ai-'+id).contentWindow.hasUnsavedKnowledgeChanges();}catch{return false;}}
   function notesDirty(id) {try{const frame=$('frame-notes-'+id);return state.notesLoaded[id]&&typeof frame.contentWindow?.hasUnsavedKnowledgeChanges==='function'&&frame.contentWindow.hasUnsavedKnowledgeChanges();}catch{return false;}}
   function reloadNotesFrame() {if(notesDirty(state.device)&&!window.confirm('笔记页面有未保存的内容或正在进行的录音。重新加载会丢失这些内容，继续吗？'))return;state.notesLoaded[state.device]=false;$('frame-notes-'+state.device).removeAttribute('src');renderNotesFrame();}
@@ -209,7 +229,7 @@
     if(value){try{const url=new URL(value);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash||url.pathname!=='/')throw new Error();address=url.origin;}catch{showError('connection-error','请填写完整的手机服务地址，不要附带路径或参数。');return;}}
     if(address!==state.config.androidUrl&&(frameDirty('android')||notesDirty('android'))&&!window.confirm('手机资料有未保存的修改。更换地址会重新加载，继续吗？'))return;
     $('connect-save').disabled=true;showError('connection-error','');
-    try{const config=await api('/api/config',{androidUrl:address});state.config={...state.config,...config,androidUrl:typeof config.androidUrl==='string'?config.androidUrl:address};state.configReady=true;renderSync();state.loaded.android=false;$('frame-android').removeAttribute('src');state.notesLoaded.android=false;$('frame-notes-android').removeAttribute('src');state.spineLoaded.android=false;$('frame-spine-android').removeAttribute('src');closeConnection();await refreshDevices();showToast(device('android')?.online?'手机已连接':'地址已保存，请检查手机服务与网络。',!device('android')?.online);}
+    try{const config=await api('/api/config',{androidUrl:address});state.config={...state.config,...config,androidUrl:typeof config.androidUrl==='string'?config.androidUrl:address};state.configReady=true;renderSync();state.loaded.android=false;$('frame-android').removeAttribute('src');state.notesLoaded.android=false;$('frame-notes-android').removeAttribute('src');state.spineLoaded.android=false;$('frame-spine-android').removeAttribute('src');state.minigamesLoaded.android=false;$('frame-minigames-android').removeAttribute('src');closeConnection();await refreshDevices();showToast(device('android')?.online?'手机已连接':'地址已保存，请检查手机服务与网络。',!device('android')?.online);}
     catch(error){showError('connection-error',error.message);}
     finally{$('connect-save').disabled=false;}
   }
@@ -277,6 +297,7 @@
   for(const id of ['frame-mac','frame-android','frame-spine-mac','frame-spine-android'])$(id).addEventListener('load',()=>{if(expandedEditor?.frame===$(id))releaseEditorExpansion();});
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>openPage(button.dataset.page)));
   document.querySelectorAll('[data-section]').forEach(button=>button.addEventListener('click',()=>openLibrary(button.dataset.section)));
+  document.querySelectorAll('[data-open-minigames]').forEach(button=>button.addEventListener('click',()=>openPage('minigames')));
   document.querySelectorAll('[data-pull]').forEach(button=>button.addEventListener('click',()=>pullClipboard(button.dataset.pull)));
   document.querySelectorAll('[data-send]').forEach(button=>button.addEventListener('click',()=>sendClipboard(button.dataset.send)));
   document.querySelectorAll('[data-copy-source]').forEach(button=>button.addEventListener('click',()=>pullClipboard(button.dataset.copySource,button.dataset.copyTarget)));
@@ -286,6 +307,8 @@
   $('notes-reload').addEventListener('click',reloadNotesFrame);$('notes-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());
   for(const id of ['mac','android'])$('frame-spine-'+id).addEventListener('load',()=>{if(state.device===id)$('spine-loading').hidden=true;renderSpineFrame();});
   $('spine-reload').addEventListener('click',()=>{state.spineLoaded[state.device]=false;$('frame-spine-'+state.device).removeAttribute('src');renderSpineFrame();});$('spine-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());
+  for(const id of ['mac','android'])$('frame-minigames-'+id).addEventListener('load',()=>{if(state.device===id)$('minigames-loading').hidden=true;renderMinigamesFrame();});
+  $('minigames-reload').addEventListener('click',()=>{state.minigamesLoaded[state.device]=false;$('frame-minigames-'+state.device).removeAttribute('src');renderMinigamesFrame();});$('minigames-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());
   $('frame-tts').addEventListener('load',()=>{$('tts-loading').hidden=true;});
   $('ai-device-mac').addEventListener('click',()=>{selectDevice('mac');renderAiFrame();});$('ai-device-android').addEventListener('click',()=>{selectDevice('android');renderAiFrame();});
   $('device-select').addEventListener('change',event=>selectDevice(event.target.value));$('devices-refresh').addEventListener('click',refreshDevices);$('connect-open').addEventListener('click',openConnection);$('library-connect').addEventListener('click',()=>state.device==='android'?openConnection():refreshDevices());$('library-reload').addEventListener('click',reloadLibrary);$('tts-reload').addEventListener('click',()=>{$('tts-loading').hidden=false;$('frame-tts').src='/tts/';state.loaded.tts=true;});$('auto-sync').addEventListener('change',updateSync);$('clipboard-text').addEventListener('input',()=>{state.clipboardDirty=true;});$('connection-form').addEventListener('submit',saveConnection);$('connect-close').addEventListener('click',closeConnection);$('connect-cancel').addEventListener('click',closeConnection);

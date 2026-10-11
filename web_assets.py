@@ -20,6 +20,9 @@ SPINE_ASSETS = (
     "spine/runtime/4.2/spine-webgl.js", "spine/runtime/4.2/LICENSE",
     "spine/runtime/4.3/spine-webgl.js", "spine/runtime/4.3/LICENSE",
 )
+MINIGAME_ASSETS = (
+    "minigames/index.html", "minigames/minigames-ui.js", "minigames/minigames-ui.css",
+)
 
 
 def decorate_tts_html(source: bytes) -> bytes:
@@ -37,7 +40,7 @@ def decorate_tts_html(source: bytes) -> bytes:
 
 def asset_path(name: str) -> Path:
     """Prefer bundled release assets, with the Android checkout as dev fallback."""
-    if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md", *SPINE_ASSETS):
+    if name not in ("knowledge.html", "notes.html", "motion.js", "motion.css", "vendor/markdown-it.min.js", "vendor/markdown-it.LICENSE", "vendor/markdown-it.provenance.json", "vendor/README.md", *SPINE_ASSETS, *MINIGAME_ASSETS):
         raise ValueError("Unknown DevHelper asset")
     packaged = HERE / "static" / name
     if packaged.is_file():
@@ -183,5 +186,14 @@ def render_spine_ui(device: Device | None = None) -> str:
     if device not in (None, "mac", "android"):
         raise ValueError("Unknown device; choose mac or android")
     source = asset_path("spine/index.html").read_text(encoding="utf-8")
+    source = _replace_required(source, 'data-device="android"', f'data-device="{device or "mac"}"')
+    return _scope_paths(source, device) if device else source
+
+
+def render_minigames_ui(device: Device | None = None) -> str:
+    """Use one browser workbench with APIs scoped to the selected device."""
+    if device not in (None, "mac", "android"):
+        raise ValueError("Unknown device; choose mac or android")
+    source = asset_path("minigames/index.html").read_text(encoding="utf-8")
     source = _replace_required(source, 'data-device="android"', f'data-device="{device or "mac"}"')
     return _scope_paths(source, device) if device else source

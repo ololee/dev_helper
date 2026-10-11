@@ -10,10 +10,12 @@ import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
 CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'media.py', 'audio.py', 'sync.py', 'spine.py',
+        'minigames.py', 'minigame_formats.py', 'assetripper.py', 'assetripper_cli/__init__.py', 'assetripper_cli/normalize_tuanjie.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
 ASSETS = ('knowledge.html', 'notes.html', 'motion.js', 'motion.css', 'vendor/markdown-it.min.js', 'vendor/markdown-it.LICENSE',
           'vendor/markdown-it.provenance.json', 'vendor/README.md',
+          'minigames/index.html', 'minigames/minigames-ui.js', 'minigames/minigames-ui.css',
           'spine/index.html', 'spine/player.html', 'spine/player-bootstrap.js',
           'spine/spine-player.js', 'spine/spine-runtime.js', 'spine/spine-ui.js',
           'spine/spine-ui.css', 'spine/zip-store.js', 'spine/runtime/provenance.json',
