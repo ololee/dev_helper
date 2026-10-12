@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
@@ -104,6 +105,34 @@ class ServerTests(unittest.TestCase):
             time.sleep(.02)
         self.assertEqual(saved['lastStatus'], 'completed', saved)
         self.assertEqual(self.client.get('/api/workflows/tasks').status_code, 200)
+
+    def test_library_allows_same_origin_ai_frame_without_external_embeds(self):
+        class PolicyParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.policies = []
+
+            def handle_starttag(self, tag, attributes):
+                values = dict(attributes)
+                if tag == 'meta' and values.get('http-equiv', '').lower() == 'content-security-policy':
+                    self.policies.append(values['content'])
+
+        for device in ('mac', 'android'):
+            with self.subTest(device=device):
+                page = self.client.get('/device-ui/' + device + '/')
+                self.assertEqual(page.status_code, 200)
+                parser = PolicyParser()
+                parser.feed(page.text)
+                self.assertTrue(parser.policies)
+                for policy in parser.policies:
+                    directives = {parts[0]: parts[1:] for raw in policy.split(';') if (parts := raw.split())}
+                    # Every delivered policy must permit the local AI iframe;
+                    # an extra restrictive policy would still block the browser.
+                    self.assertEqual(directives.get('frame-src', directives.get('child-src', directives.get('default-src'))), ["'self'"])
+                    self.assertEqual(directives['default-src'], ["'none'"])
+                    self.assertEqual(directives['object-src'], ["'none'"])
+                self.assertIn('id="knowledge-ai-frame"', page.text)
+                self.assertEqual(self.client.get('/device-ui/' + device + '/notes').status_code, 200)
 
     def test_ai_capabilities_and_explicit_test_use_scoped_routes(self):
         capability = {'configured': False, 'model': 'deepseek-flash', 'tools': [], 'features': {'chat': True}}
