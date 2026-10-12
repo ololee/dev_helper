@@ -213,6 +213,115 @@ class FormatsTests(unittest.TestCase):
 
 
 class LibraryTests(unittest.TestCase):
+    def imported_record(self,service,root,label,entries,platform='wechat',app_id='',version='',source_ids=None):
+        source=root/(label+'.zip'); metadata={'platform':platform,'appId':app_id,'name':label,'version':version,'cacheAssociation':'scoped-appid' if app_id else 'unassociated'}
+        manifest_files=[{'path':name,'kind':kind,**({'sourceId':source_ids[name]} if source_ids and name in source_ids else {})} for name,_,kind in entries]
+        with zipfile.ZipFile(source,'w') as archive:
+            archive.writestr('manifest.json',json.dumps({'game':metadata,'files':manifest_files}))
+            for name,data,_ in entries: archive.writestr(name,data)
+        job=wait(service,service.import_archive(source));self.assertEqual(job['state'],'completed',job)
+        return job['result']['gameId']
+
+    def test_confirmed_appid_groups_package_versions_cache_and_historical_ids(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); app_id='wx0123456789abcdef'
+            first=tpkg([('game.js',b'cc.game.run();')]); second=tpkg([('game.js',b'cc.game.run(); console.log("version two");')]); resource=b'UnityFS\0\x00\x00\x00\x072022.3.61t9\0'
+            try:
+                a=self.imported_record(service,root,'package-one',[('main.pkg',first,'package')],app_id=app_id,version='1')
+                b=self.imported_record(service,root,'package-two',[('main.pkg',second,'package')],app_id=app_id,version='2')
+                c=self.imported_record(service,root,'downloaded-cache',[('res/common.res',resource,'cache')],app_id=app_id)
+                listing=service.list_games();self.assertEqual(listing['total'],1);group=listing['games'][0]
+                self.assertEqual(group['sourceGameIds'],sorted([a,b,c]));self.assertEqual(group['packageCount'],2);self.assertEqual(group['cacheFileCount'],1)
+                self.assertEqual(group['packageBytes'],len(first)+len(second));self.assertEqual(group['cacheBytes'],len(resource))
+                self.assertEqual(group['engine'],'tuanjie');self.assertEqual(group['engineVariant'],'tuanjie')
+                self.assertEqual({row['version'] for row in group['packageVersions']},{'1','2'});self.assertEqual(group['linkedCaches'][0]['id'],c)
+                self.assertEqual(group['linkedCaches'][0]['associationSource'],'app-id');self.assertFalse(any(key.startswith('_') for key in group))
+                for old_id in (a,b,c): self.assertEqual(service.get_game(old_id)['game']['id'],group['id'])
+                raw=wait(service,service.export({'gameId':b,'mode':'raw','notify':False}));self.assertEqual(raw['state'],'completed',raw)
+                exported=raw['result']['export'];self.assertEqual(exported['game']['packageCount'],2);self.assertEqual(exported['game']['cacheFileCount'],1)
+                with zipfile.ZipFile(service.export_file(exported['id'])) as archive:
+                    manifest=json.loads(archive.read('manifest.json'));source_bytes=[archive.read(item['path']) for item in manifest['files']]
+                    self.assertCountEqual(source_bytes,[first,second,resource]);self.assertTrue(all(len(item['sourceId'])==64 for item in manifest['files']))
+                self.assertEqual(len(service.get_game(c)['exports']),1)
+            finally: service.close()
+
+    def test_manual_unknown_cache_association_unlink_and_identity_persist(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); package=tpkg([('game.js',b'cc.game.run();')]); data=b'cached unknown resource'
+            try:
+                target=self.imported_record(service,root,'unknown-package',[('main.pkg',package,'package')])
+                cache=self.imported_record(service,root,'unknown-cache',[('res/opaque',data,'cache')])
+                group=service.associate_cache(cache,target);self.assertEqual(group['id'],target);self.assertEqual(group['appId'],'')
+                self.assertEqual(group['linkedCaches'][0]['associationSource'],'manual');self.assertEqual(group['cacheAssociation'],'manual')
+                self.assertEqual(service.list_games()['total'],1)
+                service.close();service=MiniGameService(root/'library');wait(service,service.scan())
+                self.assertEqual(service.get_game(cache)['game']['id'],target);self.assertEqual(service.get_game(target)['game']['appId'],'')
+                detached=service.unlink_cache(cache);self.assertEqual(detached['id'],cache);self.assertEqual(detached['associationSource'],'unlinked')
+                self.assertEqual(service.list_games()['total'],2);self.assertEqual(service.get_game(target)['game']['cacheFileCount'],0)
+                service.associate_cache(cache,target);updated=service.metadata_identity(target,'wx0123456789abcdef','确认的名称')
+                self.assertEqual(updated['name'],'确认的名称');self.assertEqual(updated['appIdSource'],'manual');self.assertEqual(updated['cacheFileCount'],1)
+                self.assertEqual(service._read(service.game_root,cache)['appId'],'')
+                with self.assertRaises(ValueError): service.metadata_identity(target,'wxaaaaaaaaaaaaaaaa')
+                with self.assertRaises(ValueError): service.metadata_identity(target,'tt0123456789abcd')
+            finally: service.close()
+
+    def test_association_rejects_platform_or_confirmed_appid_conflicts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); package=tpkg([('game.js',b'cc.game.run();')])
+            try:
+                target=self.imported_record(service,root,'wechat-package',[('main.pkg',package,'package')],app_id='wx0123456789abcdef')
+                cache=self.imported_record(service,root,'different-wechat-cache',[('res/opaque',b'cache','cache')],app_id='wxaaaaaaaaaaaaaaaa')
+                cross=self.imported_record(service,root,'douyin-cache',[('res/opaque',b'cache','cache')],platform='douyin')
+                for other in (cache,cross):
+                    with self.assertRaises(ValueError): service.associate_cache(other,target)
+                with self.assertRaises(ValueError): service.associate_cache(target,cache)
+                with self.assertRaises(ValueError): service.associate_cache(cache,cross)
+                with self.assertRaises(ValueError): service.unlink_cache(target)
+                self.assertEqual(service.list_games()['total'],3)
+                miniature=service._read(service.game_root,target);miniature['gameType']='miniprogram';write_path=service.game_root/target/'manifest.json';write_path.write_text(json.dumps(miniature))
+                unknown=self.imported_record(service,root,'unknown-cache',[('res/file',b'cache','cache')])
+                with self.assertRaisesRegex(ValueError,'普通小程序'): service.associate_cache(unknown,target)
+            finally: service.close()
+
+    def test_explicit_unlink_blocks_automatic_reassociation_after_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); service=MiniGameService(root/'library'); app_id='wx0123456789abcdef'
+            try:
+                target=self.imported_record(service,root,'known-package',[('main.pkg',tpkg([('game.js',b'cc.game.run();')]),'package')],app_id=app_id)
+                cache=self.imported_record(service,root,'known-cache',[('res/opaque',b'cache','cache')],app_id=app_id)
+                self.assertEqual(service.list_games()['total'],1);service.unlink_cache(cache);service.close();service=MiniGameService(root/'library')
+                wait(service,service.scan());self.assertEqual(service.list_games()['total'],2);self.assertEqual(service.get_game(cache)['game']['id'],cache)
+                restored=service.associate_cache(cache,target);self.assertEqual(restored['id'],target);self.assertEqual(service.list_games()['total'],1)
+            finally: service.close()
+
+    def test_origin_and_content_dedup_retains_conflicting_bytes_and_distinct_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);service=MiniGameService(root/'library');app_id='wx0123456789abcdef';origin='1'*64
+            try:
+                a=self.imported_record(service,root,'source-a',[('res/same',b'one','cache')],app_id=app_id,source_ids={'res/same':origin})
+                self.imported_record(service,root,'duplicate',[('res/same',b'one','cache')],app_id=app_id,source_ids={'res/same':origin})
+                self.imported_record(service,root,'changed-content',[('res/same',b'two','cache')],app_id=app_id,source_ids={'res/same':origin})
+                self.imported_record(service,root,'distinct-source',[('res/same',b'one','cache')],app_id=app_id,source_ids={'res/same':'2'*64})
+                group=service.get_game(a)['game'];self.assertEqual(group['cacheFileCount'],3);self.assertEqual(group['cacheBytes'],9)
+                raw=wait(service,service.export({'gameId':a,'mode':'raw','notify':False}));self.assertEqual(raw['state'],'completed',raw)
+                with zipfile.ZipFile(service.export_file(raw['result']['exportId'])) as archive:
+                    manifest=json.loads(archive.read('manifest.json'));self.assertEqual(len(manifest['files']),3)
+                    self.assertCountEqual([archive.read(item['path']) for item in manifest['files']],[b'one',b'two',b'one'])
+                imported=wait(service,service.import_archive(service.export_file(raw['result']['exportId'])))
+                self.assertEqual(imported['state'],'completed',imported);self.assertEqual(imported['result']['game']['cacheFileCount'],3)
+            finally: service.close()
+
+    def test_manual_association_moves_an_entire_cache_only_group(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);service=MiniGameService(root/'library');app_id='wx0123456789abcdef'
+            try:
+                target=self.imported_record(service,root,'unknown-package',[('main.pkg',tpkg([('game.js',b'cc.game.run();')]),'package')])
+                a=self.imported_record(service,root,'cache-a',[('res/a',b'a','cache')],app_id=app_id)
+                b=self.imported_record(service,root,'cache-b',[('res/b',b'b','cache')],app_id=app_id)
+                group=service.associate_cache(a,target);self.assertEqual(group['appId'],'');self.assertEqual(group['sourceGameIds'],sorted([target,a,b]))
+                self.assertEqual({item['id'] for item in group['linkedCaches']},{a,b});self.assertEqual(service.list_games()['total'],1)
+            finally:service.close()
+
     def test_mixed_inventory_counts_payload_only_and_exports_extensionless_assets(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as folder:

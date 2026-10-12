@@ -43,7 +43,7 @@ from assetripper import AssetRipperAdapter
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.8.3"
+VERSION = "2.8.4"
 
 
 def tool_result(value):
@@ -667,6 +667,15 @@ class Desktop:
                 image = bytes(image_buffer)
                 operation = lambda: service.metadata_icon(route[1], image)
             elif len(route) == 3 and route[0] == 'games' and route[2] == 'metadata' and method == 'POST': operation = lambda: service.metadata(route[1], data)
+            elif len(route) == 3 and route[0] == 'games' and route[2] == 'associate' and method == 'POST':
+                if set(data) != {'targetGameId'}: raise ValueError('请选择目标游戏')
+                operation = lambda: service.associate_cache(route[1], data['targetGameId'])
+            elif len(route) == 3 and route[0] == 'games' and route[2] == 'unlink' and method == 'POST':
+                if data: raise ValueError('解除关联不需要额外参数')
+                operation = lambda: service.unlink_cache(route[1])
+            elif len(route) == 3 and route[0] == 'games' and route[2] == 'identity' and method == 'POST':
+                if 'appId' not in data or set(data) - {'appId', 'name'}: raise ValueError('请提供游戏 AppID')
+                operation = lambda: service.metadata_identity(route[1], data['appId'], data.get('name'))
             elif route == ['jobs'] and method == 'GET': operation = service.jobs
             elif len(route) == 2 and route[0] == 'jobs' and method == 'GET': operation = lambda: service.job(route[1])
             elif len(route) == 3 and route[0] == 'jobs' and route[2] == 'cancel' and method == 'POST': operation = lambda: service.cancel(route[1])

@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -41,7 +42,7 @@ class MiniGameMetadataHttpTests(unittest.TestCase):
 
     def imported(self, label, stamp=None, icon=False, legacy=False):
         source = self.root / (label + '.zip')
-        metadata = {'platform': 'wechat', 'appId': 'wx0123456789abcdef', 'name': label, 'nameSource': 'host-metadata'}
+        metadata = {'platform': 'wechat', 'appId': 'wx'+hashlib.sha256(label.encode()).hexdigest()[:16], 'name': label, 'nameSource': 'host-metadata'}
         if stamp is not None:
             if legacy:
                 metadata['source'] = [{'modifiedSeconds': stamp // 1000}]

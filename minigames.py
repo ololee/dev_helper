@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import threading
@@ -24,7 +25,11 @@ BASE='/api/knowledge/minigames'
 ICON_LIMIT=2*1024*1024
 ICON_SUFFIXES=('.png','.jpg','.webp','.gif')
 PACKAGE_EXT={'.pkg','.wxapkg','.ttpkg'}
-CACHE_ASSOCIATIONS={'none','scoped-appid','scoped-directory','unassociated','version-unconfirmed'}
+CACHE_ASSOCIATIONS={'none','scoped-appid','scoped-directory','unassociated','version-unconfirmed','manual'}
+
+
+def valid_app_id(platform,value):
+    return isinstance(value,str) and bool(re.fullmatch('wx[0-9a-fA-F]{16}' if platform=='wechat' else 'tt[0-9a-fA-F]{8,64}' if platform=='douyin' else r'(?!)',value))
 
 
 def now(): return int(time.time()*1000)
@@ -195,6 +200,24 @@ def inventory(root,metadata=None,app_id=''):
     return result
 
 
+def payload_index(root,source_id):
+    """Private immutable content index; explicit source identity never comes from a sandbox hash."""
+    manifest=source_manifest(root); roles=source_roles(root)
+    metadata={item.get('path'):item for item in manifest.get('files',[]) if isinstance(item,dict)} if isinstance(manifest.get('files'),list) else {}
+    rows=[]
+    for path in payload_files(root,manifest.get('game',{})):
+        relative=path.relative_to(root).as_posix(); supplied=metadata.get(relative,{})
+        origin=supplied.get('sourceId')
+        if not isinstance(origin,str) or not re.fullmatch('[0-9a-f]{64}',origin): origin=hashlib.sha256((source_id+'\0'+relative).encode()).hexdigest()
+        original=supplied.get('originalPath',relative)
+        try: original=safe_path(original)
+        except (ValueError,FormatError): original=relative
+        with path.open('rb') as stream: digest=hashlib.file_digest(stream,'sha256').hexdigest()
+        rows.append({'path':relative,'kind':'package' if original_package(path,roles.get(relative,'')) else 'cache',
+                     'bytes':path.stat().st_size,'sourceId':origin,'originalPath':original,'sha256':digest})
+    return rows
+
+
 def file_kind(path):
     suffix=path.suffix.lower()
     if suffix in {'.png','.jpg','.jpeg','.webp','.gif','.ktx','.pvr','.astc'}: return 'image'
@@ -254,35 +277,167 @@ class MiniGameService:
         if sort not in ('latest','earliest'): raise ValueError('排序方式无效。')
         if not isinstance(offset,int) or not isinstance(limit,int) or offset<0 or not 1<=limit<=100: raise ValueError('分页参数无效。')
         with self.lock:
-            rows=[json.loads(p.read_text('utf-8')) for p in self.game_root.glob('*/manifest.json') if not p.parent.name.startswith('.')]
+            rows=[self._public_group(members) for members in self._groups()]
         rows=[v for v in rows if platform=='all' or v['platform']==platform]
         rows.sort(key=lambda v:(not cache_modified_at(v),(-1 if sort=='latest' else 1)*cache_modified_at(v),v['id']))
         return {'games':rows[offset:offset+limit],'total':len(rows),'offset':offset,'limit':limit,'sort':sort,'hasMore':offset+limit<len(rows)}
 
     def get_game(self,id):
         with self.lock:
-            game=self._read(self.game_root,id)
+            game=self._public_group(self._members(id))
             exports=[json.loads(p.read_text('utf-8')) for p in self.export_root.glob('*/manifest.json') if not p.parent.name.startswith('.')]
-        return {'game':game,'exports':sorted((e for e in exports if e['gameId']==id),key=lambda e:e['createdAt'],reverse=True)}
+        return {'game':game,'exports':sorted((e for e in exports if e['gameId'] in game['sourceGameIds']),key=lambda e:e['createdAt'],reverse=True)}
+
+    def _base_games(self):
+        rows=[]
+        for path in self.game_root.glob('*/manifest.json'):
+            if path.parent.name.startswith('.'): continue
+            value=json.loads(path.read_text('utf-8'))
+            if '_payloadInventory' not in value:
+                value['_payloadInventory']=payload_index(path.parent/'input',value['id']); write_json(path,value)
+            rows.append(value)
+        return rows
+
+    def _groups(self):
+        rows=self._base_games(); by_id={row['id']:row for row in rows}; parents={key:key for key in by_id}
+        def root(key):
+            while parents[key]!=key: parents[key]=parents[parents[key]]; key=parents[key]
+            return key
+        def join(first,second):
+            first,second=root(first),root(second)
+            if first!=second: parents[max(first,second)]=min(first,second)
+        automatic={}
+        for row in rows:
+            if row.get('_associationExcluded') or row.get('_targetGameId'): continue
+            if valid_app_id(row.get('platform'),row.get('appId')):
+                key=(row['platform'],row['appId'])
+                if key in automatic: join(row['id'],automatic[key])
+                else: automatic[key]=row['id']
+        for row in rows:
+            target=by_id.get(row.get('_targetGameId'))
+            if not target or row.get('packageCount',0) or not target.get('packageCount',0) or row['platform']!=target['platform']: continue
+            selected=[member for member in rows if root(member['id']) in (root(row['id']),root(target['id']))]
+            if any(member.get('appId') and not valid_app_id(member['platform'],member['appId']) for member in selected): continue
+            identifiers={member.get('appId') for member in selected if member.get('appId')}
+            if len(identifiers)<=1: join(row['id'],target['id'])
+        result={}
+        for row in rows: result.setdefault(root(row['id']),[]).append(row)
+        return list(result.values())
+
+    def _members(self,id):
+        id=identifier(id)
+        for members in self._groups():
+            if any(row['id']==id for row in members): return members
+        raise FileNotFoundError('未找到该小游戏、导出或任务。')
+
+    @staticmethod
+    def _unique_payload(members):
+        seen=set(); entries=[]
+        for row in sorted(members,key=lambda row:row['id']):
+            for item in row['_payloadInventory']:
+                key=(item['sourceId'],item['sha256'])
+                if key not in seen: entries.append((row,item)); seen.add(key)
+        return entries
+
+    def _public_group(self,members):
+        packages=sorted((row for row in members if row.get('packageCount',0)),key=lambda row:row['id'])
+        targets={row.get('_targetGameId') for row in members}
+        representative=next((row for row in packages if row['id'] in targets),None) or (packages or sorted(members,key=lambda row:row['id']))[0]
+        game={key:copy.deepcopy(value) for key,value in representative.items() if not key.startswith('_')}
+        candidates=packages or members
+        names=sorted((row for row in candidates if row.get('name')),key=lambda row:(row.get('nameSource')=='manual',row.get('updatedAt',0)),reverse=True)
+        if names:
+            for key in ('name','nameSource'): game[key]=names[0].get(key,'')
+        icons=sorted((row for row in candidates if row.get('iconAvailable')),key=lambda row:(row.get('iconSource')=='manual',row.get('updatedAt',0)),reverse=True)
+        game['iconAvailable']=bool(icons)
+        if icons:
+            game.update(iconUrl=BASE+'/games/'+game['id']+'/icon',iconSource=icons[0].get('iconSource',''),iconUpdatedAt=icons[0].get('updatedAt',0))
+        detected=sorted((row for row in members if row.get('engine') in ('unity','tuanjie')),key=lambda row:row.get('engine')=='tuanjie',reverse=True)
+        if detected:
+            for key in ('engine','engineVariant','engineVersion','confidence'): game[key]=detected[0].get(key,'')
+        evidence=[]
+        for row in members:
+            for entry in row.get('evidence',[]):
+                if entry not in evidence: evidence.append(entry)
+        game['evidence']=evidence[:100]
+        entries=self._unique_payload(members); package_entries=[item for _,item in entries if item['kind']=='package']; caches=[item for _,item in entries if item['kind']=='cache']
+        game.update(packageCount=len(package_entries),packageBytes=sum(item['bytes'] for item in package_entries),cacheFileCount=len(caches),cacheBytes=sum(item['bytes'] for item in caches))
+        game['bytes']=game['packageBytes']+game['cacheBytes'];game['inventoryKind']='mixed' if package_entries and caches else 'package' if package_entries else 'cache'
+        game['cacheModifiedAt']=max((cache_modified_at(row) for row in members),default=0)
+        game['updatedAt']=max((row.get('updatedAt',0) for row in members),default=0)
+        game['sourceGameIds']=sorted(row['id'] for row in members)
+        if representative.get('_associationExcluded'): game['associationSource']='unlinked'
+        versions=[version for row in packages for version in (row.get('_packageVersionMetadata') or [{'id':row['id'],'version':row.get('version',''),'cacheLabel':row.get('cacheLabel',''),'packageCount':row.get('packageCount',0),'packageBytes':row.get('packageBytes',0)}])]
+        game['packageVersions']=[]
+        for version in versions:
+            if version not in game['packageVersions']: game['packageVersions'].append(version)
+        game['linkedCaches']=[{'id':row['id'],'platform':row['platform'],'appId':row.get('appId',''),'inventoryKind':'cache','cacheLabel':row.get('cacheLabel',''),'cacheFileCount':row.get('cacheFileCount',0),'cacheBytes':row.get('cacheBytes',0),'associationSource':'manual' if row.get('_targetGameId') else 'app-id','targetGameId':game['id']} for row in members if not row.get('packageCount',0) and packages]
+        if game['linkedCaches']:
+            game['cacheAssociation']='manual' if any(row['associationSource']=='manual' for row in game['linkedCaches']) else 'scoped-appid'
+        issues=[]
+        for row in members:
+            for issue in row.get('issues',[]):
+                if issue not in issues: issues.append(issue)
+        game['issues']=issues
+        if len({row.get('version') for row in packages if row.get('version')})>1 and caches:
+            game['issues'].append('原包含多个版本，缓存未指定版本；导出会保留全部版本，不视作某一版本的完整工程。')
+        return game
+
+    def associate_cache(self,cache_id,target_game_id):
+        with self.lock:
+            cache=self._read(self.game_root,cache_id); members=self._members(target_game_id); target=self._public_group(members)
+            if cache.get('packageCount',0) or not cache.get('cacheFileCount',0): raise ValueError('请选择独立的下载缓存记录。')
+            current=self._members(cache_id); caches=current if all(not row.get('packageCount',0) for row in current) else [cache]
+            if not target.get('packageCount',0): raise ValueError('请选择包含原包的游戏。')
+            if any(row.get('gameType')=='miniprogram' for row in members): raise ValueError('目标已确认为普通小程序，不能关联小游戏资源缓存。')
+            if any(row['platform']!=target['platform'] or row['platform'] not in ('wechat','douyin') for row in caches): raise ValueError('缓存与游戏平台不同，不能关联。')
+            if any(row.get('appId') and not valid_app_id(row['platform'],row['appId']) for row in [*caches,*members]): raise ValueError('来源 AppID 与平台不匹配，不能关联。')
+            identifiers={row.get('appId') for row in [*caches,*members] if row.get('appId')}
+            if len(identifiers)>1: raise ValueError('缓存与原包的 AppID 不一致，不能关联。')
+            for cache in caches:
+                cache.update(_targetGameId=target['id'],_associationExcluded=False,updatedAt=now());write_json(self.game_root/cache['id']/'manifest.json',cache)
+            return self._public_group(self._members(target['id']))
+
+    def unlink_cache(self,cache_id):
+        with self.lock:
+            cache=self._read(self.game_root,cache_id)
+            if cache.get('packageCount',0): raise ValueError('原包记录不能作为独立缓存解除。')
+            cache.pop('_targetGameId',None);cache.update(_associationExcluded=True,updatedAt=now());write_json(self.game_root/cache['id']/'manifest.json',cache)
+            return self._public_group(self._members(cache['id']))
+
+    def metadata_identity(self,id,app_id,name=None):
+        with self.lock:
+            members=self._members(id);game=self._public_group(members);target=self._read(self.game_root,game['id'])
+            if not valid_app_id(target['platform'],app_id): raise ValueError('请输入所属平台的完整合法 AppID。')
+            if any(row.get('appId') and row['appId']!=app_id for row in members): raise ValueError('已有来源的 AppID 与输入不一致，不能覆盖。')
+            if name is not None and (not isinstance(name,str) or not 1<=len(name.strip())<=160): raise ValueError('名称须为 1 至 160 个字符。')
+            target.update(appId=app_id,appIdSource='manual',updatedAt=now())
+            if name is not None: target.update(name=name.strip(),nameSource='manual')
+            write_json(self.game_root/target['id']/'manifest.json',target)
+            return self._public_group(self._members(target['id']))
 
     def metadata(self,id,fields):
         if set(fields)-{'name'} or not isinstance(fields.get('name'),str) or not 1<=len(fields['name'].strip())<=160: raise ValueError('名称须为 1 至 160 个字符。')
         with self.lock:
-            game=self._read(self.game_root,id); game.update(name=fields['name'].strip(),nameSource='manual',updatedAt=now())
-            write_json(self.game_root/id/'manifest.json',game)
-        return game
+            game=self._read(self.game_root,self._public_group(self._members(id))['id']); game.update(name=fields['name'].strip(),nameSource='manual',updatedAt=now())
+            write_json(self.game_root/game['id']/'manifest.json',game)
+            return self._public_group(self._members(game['id']))
 
     def icon_file(self,id):
-        game=self._read(self.game_root,id)
-        if game.get('iconAvailable') is not True: raise FileNotFoundError('未找到已关联的小游戏图标。')
-        for suffix in ICON_SUFFIXES:
-            path=self.game_root/id/('icon'+suffix)
-            if icon_suffix(path)==suffix: return path
+        with self.lock:
+            members=self._members(id);preferred=self._public_group(members)['id']
+            candidates=sorted(members,key=lambda row:(row['id']==preferred,row.get('iconSource')=='manual',row.get('updatedAt',0)),reverse=True)
+            for game in candidates:
+                if game.get('iconAvailable') is not True: continue
+                for suffix in ICON_SUFFIXES:
+                    path=self.game_root/game['id']/('icon'+suffix)
+                    if icon_suffix(path)==suffix: return path
         raise FileNotFoundError('未找到已关联的小游戏图标。')
 
     def metadata_icon(self,id,data):
         data=normalized_icon(data)
         with self.lock:
+            id=self._public_group(self._members(id))['id']
             game=self._read(self.game_root,id)
             path=self.game_root/id/'icon.png'; pending=path.with_suffix('.pending')
             pending.write_bytes(data); os.chmod(pending,0o600); os.replace(pending,path)
@@ -290,7 +445,7 @@ class MiniGameService:
                 if suffix!='.png': (self.game_root/id/('icon'+suffix)).unlink(missing_ok=True)
             game.update(iconAvailable=True,iconUrl=BASE+'/games/'+id+'/icon',iconSource='manual',updatedAt=now())
             write_json(self.game_root/id/'manifest.json',game)
-        return game
+            return self._public_group(self._members(id))
 
     def _import_icon(self,root,folder,metadata,game):
         """Only an explicit archived association can supply a local raster icon."""
@@ -366,8 +521,8 @@ class MiniGameService:
     def scan(self,fields=None):
         platform=(fields or {}).get('platform','all')
         def run(event,report):
-            result=self.list_games(platform,0,100)
-            for game in result['games']:
+            with self.lock: rows=[row for row in self._base_games() if platform=='all' or row['platform']==platform]
+            for game in rows:
                 check_cancel(event); report(message='检查本机已导入资源')
                 self._refresh(game['id'])
             return {**self.list_games(platform,0,100),'source':'imported','message':'电脑列出已导入的资源；宿主缓存扫描请切换到手机。'}
@@ -403,13 +558,16 @@ class MiniGameService:
                 if not isinstance(game['name'],str) or len(game['name'])>160: game['name']=''
                 game['nameSource']='manual' if name.strip() else field_source(metadata,'name',game['name'])
                 game['appIdSource']=field_source(metadata,'appId',game['appId'])
+                game['_payloadInventory']=payload_index(pending/'input',id)
+                versions=metadata.get('packageVersions')
+                if isinstance(versions,list): game['_packageVersionMetadata']=[{key:item[key] for key in ('id','version','cacheLabel','packageCount','packageBytes') if key in item} for item in versions[:1000] if isinstance(item,dict)]
                 if metadata_text(metadata.get('metadataSource'),150): game['metadataSource']=metadata_text(metadata['metadataSource'],150)
                 self._import_icon(pending/'input',pending,metadata,game)
                 if not game['appId']: game['issues'].append('包内未提供 AppID；缓存文件名不能作为 AppID。')
                 if not game['name']: game['issues'].append('名称未知，可手动补充。')
                 if game['engine']=='unknown': game['issues'].append('需解包后再检查引擎。')
                 write_json(pending/'manifest.json',game); check_cancel(event); os.replace(pending,self.game_root/id); published=True
-                return {'game':game,'gameId':id}
+                return {'game':self.get_game(id)['game'],'gameId':id}
             finally:
                 if not published: shutil.rmtree(pending,ignore_errors=True)
         try:
@@ -516,8 +674,25 @@ class MiniGameService:
         if not files(output): raise ValueError('WebData 缓存未恢复出可处理资源；原始文件保留，请检查容器完整性。')
         return output
 
+    def _materialize_sources(self,members,output,event,game):
+        """Combine only confirmed members, retaining separate source namespaces."""
+        if len(members)==1:
+            row=members[0]
+            return self.game_root/row['id']/'input',[dict(item) for _,item in self._unique_payload(members)]
+        output.mkdir(); entries=[]
+        for row,item in self._unique_payload(members):
+            check_cancel(event)
+            source=self.game_root/row['id']/'input'/item['path']
+            relative='payload/'+row['id']+'/'+item['path']; target=output/relative;target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(source,target);entries.append({**item,'path':relative})
+        write_json(output/'manifest.json',{'formatVersion':1,'game':game,'files':entries})
+        return output,entries
+
     def export(self,fields):
-        id=identifier(fields.get('gameId')); game=self.get_game(id)['game']; mode=fields.get('mode','assets')
+        id=identifier(fields.get('gameId'))
+        with self.lock:
+            members=copy.deepcopy(self._members(id));game=self._public_group(members);id=game['id']
+        mode=fields.get('mode','assets')
         if mode not in ('raw','unpacked','assets','unity-project'): raise ValueError('导出方式无效。')
         for key in ('summarize','notify'):
             if key in fields and not isinstance(fields[key],bool): raise ValueError(key+' 必须是布尔值。')
@@ -526,11 +701,11 @@ class MiniGameService:
             published=False
             try:
                 content=pending/'files'; content.mkdir(); detail={}; job_message=None
-                source=self.game_root/id/'input'
+                source,source_entries=self._materialize_sources(members,pending/'source-bundle',event,game)
                 if mode=='raw': shutil.copytree(source,content,dirs_exist_ok=True)
                 else:
                     detail=self._unpack(source,pending/'unpacked',event,report)
-                    updated=self._refresh(id,pending/'unpacked')
+                    self._refresh(id,pending/'unpacked'); updated=self.get_game(id)['game']
                     if mode=='unity-project':
                         if updated['engine'] not in ('unity','tuanjie'): raise ValueError('未识别到 Unity 或团结资源。请先解包并查看识别依据。')
                         if not self.assetripper: raise ValueError('请先配置电脑 AssetRipper。')
@@ -550,7 +725,7 @@ class MiniGameService:
                             dest=content/file.relative_to(pending/'unpacked'); dest.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(file,dest)
                     shutil.rmtree(pending/'unpacked',ignore_errors=True)
                     shutil.rmtree(pending/'unity-input',ignore_errors=True)
-                exported_game={key:game[key] for key in ('platform','appId','name','nameSource','appIdSource','metadataSource','cacheLabel','version','cacheModifiedAt','packageCount','packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation') if key in game}
+                exported_game={key:game[key] for key in ('platform','appId','name','nameSource','appIdSource','metadataSource','cacheLabel','version','cacheModifiedAt','packageCount','packageBytes','cacheFileCount','cacheBytes','inventoryKind','cacheAssociation','packageVersions','linkedCaches','sourceGameIds') if key in game}
                 exported_game['iconAvailable']=False
                 try:
                     icon=self.icon_file(id)
@@ -558,6 +733,8 @@ class MiniGameService:
                     target=content/icon_path; target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(icon,target)
                     exported_game.update(iconAvailable=True,iconArchivePath=icon_path,iconSource=game.get('iconSource','imported-metadata'))
                 except FileNotFoundError: pass
+                if mode=='raw': write_json(content/'manifest.json',{'formatVersion':1,'game':exported_game,'files':source_entries})
+                shutil.rmtree(pending/'source-bundle',ignore_errors=True)
                 check_cancel(event); report(message='建立素材索引并打包',progress=85)
                 inventory=[{'path':p.relative_to(content).as_posix(),'bytes':p.stat().st_size,'kind':file_kind(p)} for p in files(content)]
                 if not inventory: raise ValueError('没有可导出的素材。原包保留，请选择原包或解包文件。')
@@ -699,6 +876,9 @@ class MiniGameService:
             spec('job','Read persistent job state, progress and completed output. No task is replayed.',{'id':ident},('id',)),
             spec('cancel','Cancel a queued/running job; poll until stopped. Completed outputs and original caches remain.',{'id':ident},('id',),False),
             spec('rename','Edit a game display name; does not guess or change AppID.',{'id':ident,'name':{'type':'string','minLength':1,'maxLength':160}},('id','name'),False),
+            spec('associate','Explicitly associate one independent downloaded cache with a package game on the same platform. Conflicting known AppIDs are rejected. Unknown AppIDs stay unknown; source UUID choices are recorded as manual. Raw export includes all linked sources.',{'cacheId':ident,'targetGameId':ident},('cacheId','targetGameId'),False),
+            spec('unlink','Detach a cache by its original source UUID. The choice persists and prevents automatic relinking; files are retained.',{'cacheId':ident},('cacheId',),False),
+            spec('identity','Explicitly set a platform-valid AppID on a selected game whose existing source identifiers do not conflict. Optional name sets its display label. Never infers identity from a cache hash.',{'id':ident,'appId':{'type':'string','minLength':10,'maxLength':66},'name':{'type':'string','minLength':1,'maxLength':160}},('id','appId'),False),
             spec('spine','Import identified Spine skeletons/atlases/textures from one export into the existing player and return openUrl.',{'exportId':ident,'skeleton':{'type':'string','maxLength':2048}},('exportId',),False),
             spec('summarize','Explicitly send a bounded resource inventory to DeepSeek and store Markdown. No binary/code uploads or file moves.',{'exportId':ident},('exportId',),False),
             spec('assetripper_status','Read computer AssetRipper/UnityPy availability; Unity export never runs on Android.'),
@@ -716,6 +896,9 @@ class MiniGameService:
         if action=='job': return self.job(args['id'])
         if action=='cancel': return self.cancel(args['id'])
         if action=='rename': return self.metadata(args['id'],{'name':args['name']})
+        if action=='associate': return self.associate_cache(args['cacheId'],args['targetGameId'])
+        if action=='unlink': return self.unlink_cache(args['cacheId'])
+        if action=='identity': return self.metadata_identity(args['id'],args['appId'],args.get('name'))
         if action=='spine': return self.open_spine(args['exportId'],{k:v for k,v in args.items() if k=='skeleton'})
         if action=='summarize': return self.summarize(args['exportId'])
         if action=='assetripper_status': return self.assetripper.status() if self.assetripper else {'available':False}

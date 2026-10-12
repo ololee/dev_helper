@@ -249,12 +249,18 @@ class KnowledgeService:
         else:
             from spine import SpineStore
         self.spine = SpineStore(self)
+        if __package__:
+            from .resource_batches import ResourceBatchExports
+        else:
+            from resource_batches import ResourceBatchExports
+        self.resource_batches = ResourceBatchExports(self)
         self._recover_schedules()
 
     def close(self) -> None:
         self.stop_scheduler()
         self.video_editor.close()
         self.audio_editor.close()
+        self.resource_batches.close()
         # A callback may still be finishing. Keep the connection available until
         # that worker has committed its result; process exit handles final close.
         if self._thread and self._thread.is_alive():
@@ -781,8 +787,8 @@ class KnowledgeService:
 
     def list_attachments(self, offset: int = 0, limit: int = 32, media_type: str | None = None) -> dict:
         with self.lock:
-            if media_type not in (None, "image", "video", "audio"):
-                raise KnowledgeError("mediaType must be image, video or audio")
+            if media_type not in (None, "image", "video", "audio", "archive", "file"):
+                raise KnowledgeError("Invalid attachment type")
             rows = sorted((json.loads(r[0]) for r in self.db.execute("SELECT metadata FROM attachments")), key=lambda a: (a["createdAt"], a["id"]), reverse=True)
             if media_type:
                 rows = [row for row in rows if row["kind"] == media_type]
@@ -825,10 +831,12 @@ class KnowledgeService:
             header = bytes(prefix)
             declared_mime = mime.lower().split(";", 1)[0]
             declared_mime = {"audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/x-flac": "audio/flac", "application/ogg": "audio/ogg", "application/x-zip-compressed": "application/zip"}.get(declared_mime, declared_mime)
-            detected_mime, kind, extension = _sniff(header, declared_mime)
-            compatible_heif = {declared_mime, detected_mime} <= {"image/heic", "image/heif"}
-            if declared_mime != "application/octet-stream" and declared_mime != detected_mime and not compatible_heif:
-                raise KnowledgeError("Declared media type does not match the file")
+            try:
+                detected_mime, kind, extension = _sniff(header, declared_mime)
+            except KnowledgeError:
+                detected_mime, kind, extension = 'application/octet-stream', 'file', 'bin'
+            # MIME is a hint, including OOXML/EPUB/JAR whose actual container is ZIP.
+            # Content recognition determines safe preview/download behavior.
             digest, size = hashlib.sha256(), 0
             filename = "original." + extension
             with (pending / filename).open("xb") as output:
@@ -885,7 +893,7 @@ class KnowledgeService:
     def list_resources(self, fields: dict) -> dict:
         _known(fields, "source", "kind", "query", "offset", "limit")
         source, kind = fields.get("source", "all"), fields.get("kind", "all")
-        if source not in ("all", "attachment", "artifact") or kind not in ("all", "image", "video", "audio"):
+        if source not in ("all", "attachment", "artifact") or kind not in ("all", "image", "video", "audio", "archive", "file"):
             raise KnowledgeError("Invalid resource filter")
         needle = _text(fields.get("query", ""), "query", 200).casefold()
         with self.lock:
@@ -908,6 +916,25 @@ class KnowledgeService:
             return _page(items, "items", fields.get("offset", 0), fields.get("limit", 24),
                          usage={"bytes": sum(a["bytes"] for a in all_items), "unlimited": True,
                                 "availableBytes": shutil.disk_usage(self.root).free})
+
+    def delete_resource_batch(self, fields: dict) -> dict:
+        if __package__:
+            from .resource_batches import selected_items
+        else:
+            from resource_batches import selected_items
+        results = []
+        for item in selected_items(fields):
+            result = dict(item)
+            try:
+                if item['source'] != 'attachment':
+                    raise KnowledgeError('请选择本机附件')
+                self.delete_attachment(item['id'])
+                result['deleted'] = True
+            except (KnowledgeError, OSError) as error:
+                result.update(deleted=False, error=str(error))
+            results.append(result)
+        deleted = sum(r['deleted'] for r in results)
+        return dict(results=results, deletedCount=deleted, failedCount=len(results)-deleted)
 
     def _shared_path(self, value: str | None) -> Path:
         value = str(self.file_roots[0]) if value in (None, "") else _text(value, "path", 4096, True)
@@ -1075,7 +1102,7 @@ class KnowledgeService:
                 raw_length = headers.get("content-length")
                 length = int(raw_length) if raw_length is not None else None
                 if body is None:
-                    raise KnowledgeError("Upload one image, video, audio or Spine ZIP as a raw request body")
+                    raise KnowledgeError("Upload a file as a raw request body")
                 return Response(data=self.import_attachment(body, query.get("name", "media"), headers.get("content-type", "application/octet-stream").split(";", 1)[0], length))
             elif route.startswith("attachments/"):
                 parts = route[12:].split("/")
@@ -1088,7 +1115,19 @@ class KnowledgeService:
                         raise KnowledgeError("Preview not found", 404)
                     with self.lock:
                         metadata, file = self._attachment(parts[0])
-                    return Response(file=file, mime=metadata["mimeType"], headers={"Content-Disposition": "inline; filename*=UTF-8''" + quote(metadata["name"])})
+                    disposition = 'attachment' if metadata['kind'] in ('file', 'archive') else 'inline'
+                    return Response(file=file, mime=metadata["mimeType"], headers={"Content-Disposition": disposition + "; filename*=UTF-8''" + quote(metadata["name"]), 'X-Content-Type-Options': 'nosniff'})
+            elif route == 'resources/batch-delete' and method == 'POST':
+                return Response(data=self.delete_resource_batch(data))
+            elif route == 'resources/batch-export' and method == 'POST':
+                return Response(status=202, data=self.resource_batches.start(data))
+            elif route.startswith('resources/batch-export/') and method in ('GET', 'HEAD'):
+                parts = route.removeprefix('resources/batch-export/').split('/')
+                if len(parts) == 1 and method == 'GET':
+                    return Response(data=self.resource_batches.status(parts[0]))
+                if len(parts) == 2 and parts[1] == 'content':
+                    return Response(file=self.resource_batches.file(parts[0]), mime='application/zip', headers={'Content-Disposition': 'attachment; filename="resources-' + _identifier(parts[0]) + '.zip"'})
+                raise KnowledgeError('Resource export endpoint not found', 404)
             elif route == "resources" and method == "GET":
                 fields = {**query, "offset": qint("offset", 0), "limit": qint("limit", 24)}
                 return Response(data=self.list_resources(fields))
@@ -1174,6 +1213,9 @@ class KnowledgeService:
             "color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}, "width": {"type": "integer", "minimum": 1, "maximum": 32},
             "text": {"type": "string", "maxLength": 256}, "fontSize": {"type": "integer", "minimum": 12, "maximum": 128}},
             "required": ["type", "points", "color", "width"], "additionalProperties": False}}
+        batch = {'items': {'type': 'array', 'minItems': 1, 'maxItems': 100, 'items': {'type': 'object',
+                 'properties': {'source': {'enum': ['attachment', 'artifact']}, 'id': identifier},
+                 'required': ['source', 'id'], 'additionalProperties': False}}}
         result = [
             self._spec("knowledge_list_documents", "List or search local desktop Markdown memories, notes and skills.", {"kind": doc["kind"], "query": text, **pagination}),
             self._spec("knowledge_read_document", "Read Markdown including its revision; use expectedRevision when saving.", {"id": identifier}, ("id",)),
@@ -1189,14 +1231,17 @@ class KnowledgeService:
             self._spec("knowledge_vector_status", "List local vector spaces and counts.", pagination),
             self._spec("knowledge_delete_vector_space", "Delete a vector space; keep Markdown originals.", {"space": text}, ("space",), False, True),
             self._spec("knowledge_status", "Read local storage and scheduling status.", {}),
-            self._spec("knowledge_list_attachments", "List desktop imported image/video copies and download paths.", pagination),
+            self._spec("knowledge_list_attachments", "List desktop imported files and download paths.", pagination),
             self._spec("knowledge_read_attachment", "Read attachment metadata and relative download path.", {"id": identifier}, ("id",)),
             self._spec("knowledge_delete_attachment", "Delete an unreferenced media copy. Referenced media must first be removed from saved Markdown.", {"id": identifier}, ("id",), False, True),
-            self._spec("knowledge_list_managed_resources", "List managed desktop media and saved-document references.", {"source": {"enum": ["all", "attachment", "artifact"]}, "kind": {"enum": ["all", "image", "video", "audio"]}, "query": text, **pagination}),
+            self._spec("knowledge_list_managed_resources", "List managed desktop files, media and saved-document references.", {"source": {"enum": ["all", "attachment", "artifact"]}, "kind": {"enum": ["all", "image", "video", "audio", "archive", "file"]}, "query": text, **pagination}),
             self._spec("knowledge_rename_managed_resource", "Rename a desktop attachment without changing its content or Markdown address.", {"source": {"const": "attachment"}, "id": identifier, "name": text}, ("source", "id", "name"), False),
             self._spec("knowledge_delete_managed_resource", "Delete one unreferenced desktop attachment copy.", {"source": {"const": "attachment"}, "id": identifier}, ("source", "id"), False, True),
+            self._spec('knowledge_delete_resource_batch', 'Delete explicitly selected unreferenced attachments, returning per-item results; referenced or busy files are retained.', batch, ('items',), False, True),
+            self._spec('knowledge_export_resource_batch', 'Start an all-or-nothing ZIP export of selected local resources. Originals retained. Poll the returned jobId until completed.', batch, ('items',), False),
+            self._spec('knowledge_resource_batch_export_status', 'Read a resource ZIP job and completed relative downloadPath. Temporary ZIPs remain available during this process and for the latest 32 completed jobs.', {'jobId': identifier}, ('jobId',)),
             self._spec("knowledge_browse_device_files", "Browse configured desktop shared directories. Files are read-only; symlinks cannot escape shared roots.", {"path": text, "query": text, **pagination}),
-            self._spec("knowledge_import_device_attachment", "Import an image/video from a configured desktop shared directory; preserve the source.", {"path": text}, ("path",), False),
+            self._spec("knowledge_import_device_attachment", "Import one file from a configured desktop shared directory; preserve the source.", {"path": text}, ("path",), False),
             self._spec("knowledge_get_attachment_media_info", "Read image/video dimensions and duration. FFmpeg is required for some formats.", {"id": identifier}, ("id",)),
             self._spec("knowledge_start_video_attachment_edit", "Start an asynchronous local FFmpeg video crop, fixed annotations and time-range export to a new MP4 attachment. Coordinates are upright source pixels after display rotation. Annotations precede crop; odd crop dimensions round down to even pixels. Re-encodes H.264 and retains all audio tracks via AAC. The original is pinned and retained. Poll status for progress and completed attachment; no Markdown change.",
                        {**video_time, "crop": crop, "operations": operations,
@@ -1238,6 +1283,9 @@ class KnowledgeService:
             "knowledge_list_managed_resources": lambda: self.list_resources(args),
             "knowledge_rename_managed_resource": lambda: self._resource_tool(args, True),
             "knowledge_delete_managed_resource": lambda: self._resource_tool(args, False),
+            'knowledge_delete_resource_batch': lambda: self.delete_resource_batch(args),
+            'knowledge_export_resource_batch': lambda: self.resource_batches.start(args),
+            'knowledge_resource_batch_export_status': lambda: self.resource_batches.status(args.get('jobId')),
             "knowledge_browse_device_files": lambda: self.browse_files(args),
             "knowledge_import_device_attachment": lambda: self.import_file(args.get("path")),
             "knowledge_get_attachment_media_info": lambda: self.media_info(args.get("id")),

@@ -40,7 +40,7 @@ function gameTypeName(game) { if (game?.inventoryKind === 'cache') return '下�
 function modeLabel(mode, game = ui.selected) { return mode === 'raw' && game?.inventoryKind === 'cache' ? '缓存资源' : MODES[mode]?.[0] || '导出结果'; }
 function inventoryCount(game, field) { const value = game?.[field]; return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null; }
 function inventoryLine(game, kind) { const count = inventoryCount(game, kind === 'package' ? 'packageCount' : 'cacheFileCount'), bytes = game?.[kind === 'package' ? 'packageBytes' : 'cacheBytes']; return (kind === 'package' ? '原包 ' : '下载缓存 ') + (count === null ? '数量待统计' : count + (kind === 'package' ? ' 个' : ' 个文件')) + ' · ' + size(bytes); }
-function cacheAssociationName(game) { return ({ none: '仅原发布包', 'scoped-appid': '已确认同一 AppID', 'scoped-directory': '独立缓存目录，AppID 待确认', 'version-unconfirmed': '同一 AppID，缓存版本待确认', unassociated: '宿主资源缓存，归属待确认' })[game?.cacheAssociation] || '未提供关联依据'; }
+function cacheAssociationName(game) { return ({ none: '仅原发布包', 'scoped-appid': '已确认同一 AppID', 'scoped-directory': '独立缓存目录，AppID 待确认', 'version-unconfirmed': '同一 AppID，缓存版本待确认', manual: '手动选择关联', unassociated: '宿主资源缓存，归属待确认' })[game?.cacheAssociation] || '未提供关联依据'; }
 function issueText(issue) { return String(typeof issue === 'string' ? issue : issue?.message || '缓存内容不完整。').replace(/^[a-z][a-z0-9_]{0,79}:\s*/, ''); }
 function cacheTime(game) { const value = game?.cacheModifiedAt; return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 8640000000000000 ? value : 0; }
 function dateTime(value) { const stamp = Number(value); if (!Number.isFinite(stamp) || stamp <= 0 || stamp > 8640000000000000) return '未知'; return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(stamp)); }
@@ -130,10 +130,31 @@ function renderDetail(game) {
   for (const item of evidence) { const row = node('li', '', item.path || '包内线索'); if (item.match) row.append(node('span', '', item.match)); $('evidence-list').append(row); }
   const unity = ['unity', 'tuanjie', '团结'].includes(String(game.engine || '').toLowerCase());
   $('engine-note').textContent = (evidence.length ? '根据包内文件与标记识别。' : '当前没有足够的文件线索确认引擎。') + (unity ? ' Unity 与团结只有出现明确版本标记时才区分；未出现时保留“未区分”。' : '');
-  renderModes(); renderExports();
+  renderAssociations(game); renderModes(); renderExports();
+}
+function renderAssociations(game) {
+  const packageCount = inventoryCount(game, 'packageCount') || 0, linked = Array.isArray(game.linkedCaches) ? game.linkedCaches : [], versions = Array.isArray(game.packageVersions) ? game.packageVersions : [];
+  $('load-cache-associations').textContent = packageCount ? '添加下载缓存' : '关联到游戏'; $('load-cache-associations').disabled = !['wechat', 'douyin'].includes(game.platform) || game.gameType === 'miniprogram';
+  $('cache-association-hint').textContent = packageCount ? '导出会同时包含本游戏的全部原包版本和已关联下载缓存。' : game.associationSource === 'unlinked' ? '此缓存已解除关联；可重新选择所属游戏。' : '此记录只有下载缓存；确认归属后可与原包一起导出。';
+  $('package-versions').replaceChildren(); for (const version of versions) { const row = node('div', 'package-version'); row.append(node('span', '', '原包 · ' + (version.version || '版本未知')), node('span', 'hint', version.cacheLabel || size(version.packageBytes))); $('package-versions').append(row); }
+  $('linked-caches').replaceChildren(); for (const cache of linked) { if (!cache || typeof cache.id !== 'string') continue; const row = node('div', 'linked-cache'), label = node('div'); label.append(node('strong', '', cache.cacheLabel || cache.name || '下载缓存'), node('p', 'hint', (cache.cacheFileCount || 0) + ' 个文件 · ' + size(cache.cacheBytes) + ' · ' + (cache.associationSource === 'manual' ? '手动关联' : 'AppID 关联'))); row.append(label, button('解除关联', async () => { const selected = ui.selected?.id; await api('/minigames/games/' + encodeURIComponent(cache.id) + '/unlink', {}); $('cache-association-form').hidden = true; await refreshGames(selected); toast('已解除缓存关联，原文件保留。'); })); $('linked-caches').append(row); }
+  if (document.activeElement !== $('identity-input')) $('identity-input').value = game.appId || '';
+}
+async function loadAssociations() {
+  if (!ui.selected) return; const game = ui.selected, selected = game.id, packageCount = inventoryCount(game, 'packageCount') || 0; const candidates = [];
+  for (let offset = 0; ; offset += 100) { const data = await api('/minigames/games?platform=' + encodeURIComponent(game.platform) + '&offset=' + offset + '&limit=100&sort=latest'); if (ui.selected?.id !== selected) return; const rows = data.games || data.items; if (!Array.isArray(rows)) throw new Error('关联资料列表格式不正确。'); candidates.push(...rows.filter(row => row?.id !== selected && row?.platform === game.platform && row.gameType !== 'miniprogram' && (!game.appId || !row.appId || game.appId === row.appId) && (packageCount ? row.inventoryKind === 'cache' : (inventoryCount(row, 'packageCount') || 0) > 0))); if (!data.hasMore || !rows.length) break; }
+  $('cache-association-select').replaceChildren(); $('cache-association-select-label').textContent = packageCount ? '选择下载缓存' : '选择所属游戏原包'; for (const row of candidates) { const option = node('option', '', gameName(row) + ' · ' + (row.appId || 'AppID 未知') + ' · ' + (packageCount ? inventoryLine(row, 'cache') : inventoryLine(row, 'package'))); option.value = row.id; $('cache-association-select').append(option); }
+  $('cache-association-form').hidden = !candidates.length; if (!candidates.length) toast(packageCount ? '没有可关联的独立缓存；可先扫描或导入缓存。' : '没有符合条件的原包；请先扫描或导入同平台原包。');
+}
+async function saveAssociation(event) {
+  event.preventDefault(); if (!ui.selected) return; const selected = ui.selected, value = $('cache-association-select').value; if (!value) return; const packageCount = inventoryCount(selected, 'packageCount') || 0, cacheId = packageCount ? value : selected.id, targetGameId = packageCount ? selected.id : value;
+  await busy($('save-cache-association'), async () => { const data = await api('/minigames/games/' + encodeURIComponent(cacheId) + '/associate', { targetGameId }); $('cache-association-form').hidden = true; await refreshGames((data.game || data)?.id || targetGameId); toast('关联已保存；导出会包含原包与选定缓存。'); });
+}
+async function saveIdentity(event) {
+  event.preventDefault(); if (!ui.selected) return; const id = ui.selected.id, appId = $('identity-input').value.trim(); if (!appId) throw new Error('请输入已确认的完整 AppID。'); await busy($('save-identity'), async () => { const data = await api('/minigames/games/' + encodeURIComponent(id) + '/identity', { appId }); await refreshGames((data.game || data)?.id || id); toast('AppID 已手动保存。'); });
 }
 async function selectGame(game, quiet = false) {
-  const changed = ui.selected?.id !== game.id, request = ++ui.detailRequest; ui.selected = game; if (changed) { ui.exports = []; ui.exportsKey = ''; } renderGames(); renderDetail(game); if (changed) $('name-input').value = ui.nameDrafts.has(game.id) ? ui.nameDrafts.get(game.id) : game.name || '';
+  const changed = ui.selected?.id !== game.id, request = ++ui.detailRequest; ui.selected = game; if (changed) { ui.exports = []; ui.exportsKey = ''; $('cache-association-form').hidden = true; } renderGames(); renderDetail(game); if (changed) $('name-input').value = ui.nameDrafts.has(game.id) ? ui.nameDrafts.get(game.id) : game.name || '';
   $('detail-loading').hidden = quiet; document.querySelector('.detail').setAttribute('aria-busy', 'true');
   try {
     const data = await api('/minigames/games/' + encodeURIComponent(game.id)); if (request !== ui.detailRequest) return; ui.selected = normalizeGame(data);
@@ -344,6 +365,7 @@ $('previous').addEventListener('click', () => { ui.offset = Math.max(0, ui.offse
 $('scan').addEventListener('click', () => busy($('scan'), startScan)); $('name-form').addEventListener('submit', saveName); $('start-export').addEventListener('click', startExport);
 $('choose-zip').addEventListener('click', () => $('zip-input').click()); $('zip-input').addEventListener('change', () => { const file = $('zip-input').files?.[0]; $('zip-input').value = ''; importZip(file).catch(error => message(error.message, true)); });
 $('choose-icon').addEventListener('click', () => $('icon-input').click()); $('icon-input').addEventListener('change', () => { const file = $('icon-input').files?.[0]; $('icon-input').value = ''; busy($('choose-icon'), () => saveIcon(file)); });
+$('load-cache-associations').addEventListener('click', () => busy($('load-cache-associations'), loadAssociations)); $('cache-association-form').addEventListener('submit', saveAssociation); $('identity-form').addEventListener('submit', event => saveIdentity(event).catch(error => message(error.message, true)));
 $('assetripper-check').addEventListener('click', () => busy($('assetripper-check'), checkAssetRipper)); $('assetripper').addEventListener('toggle', () => { if ($('assetripper').open && !ui.tool) checkAssetRipper(); });
 window.addEventListener('message', event => { if (event.origin !== window.location.origin || event.source !== window.parent || event.data?.type !== 'devhelper.minigames-visibility') return; ui.visible = event.data.visible === true; if (ui.visible) schedulePoll(100); else clearTimeout(ui.timer); });
 document.addEventListener('visibilitychange', () => { if (active()) schedulePoll(100); else clearTimeout(ui.timer); }); window.addEventListener('pagehide', () => clearTimeout(ui.timer));
