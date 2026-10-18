@@ -21,6 +21,11 @@ npm distribution under the MIT License. The original license, package integrity
 and individual SHA-256 hashes are retained in static/vendor/tabulator/.
 Upstream: https://github.com/tabulator-tables/tabulator
 
+The read-only code preview bundles Monaco Editor 0.52.2 from the official npm
+distribution under the MIT License. The upstream LICENSE, ThirdPartyNotices.txt,
+tarball integrity and per-file SHA-256 hashes are retained in static/vendor/monaco/.
+Upstream: https://github.com/microsoft/monaco-editor
+
 Python packages are installed separately from the declared dependencies in
 pyproject.toml. Their respective license terms apply to those packages. This
 source distribution does not include third-party Python environment files,

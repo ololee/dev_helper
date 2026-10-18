@@ -40,11 +40,12 @@ from web_assets import asset_path
 from minigames import MiniGameService, BASE as MINIGAME_BASE
 from assetripper import AssetRipperAdapter
 from resource_workspace import ResourceWorkspace, ScopedResourceMcp
+from editor_assets import editor_asset
 
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.11.1"
+VERSION = "2.12.0"
 
 
 def tool_result(value):
@@ -985,6 +986,11 @@ class Desktop:
                 'vendor/tabulator/tabulator.min.css':'text/css',
             }
             name=request.path_params['path']
+            if name.startswith('vendor/monaco/'):
+                resource=await asyncio.to_thread(editor_asset,name)
+                if not resource:return Response(status_code=404)
+                target,mime=resource
+                return FileResponse(target,media_type=mime,headers={'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'})
             if name not in allowed:return Response(status_code=404)
             return FileResponse(HERE/'static'/name,media_type=allowed[name],headers={'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'})
         return Starlette(lifespan=self.lifespan, routes=[

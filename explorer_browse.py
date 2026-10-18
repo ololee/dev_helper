@@ -95,12 +95,23 @@ def browse_assets(library, *, project_id=None, path='', kind=None, sort='name', 
                 SELECT a.id,a.size,a.mtime_ns,a.kind,substr(a.path,?) AS relative_path
                 FROM assets a WHERE a.project_id=? AND a.path LIKE ? ESCAPE '\\'
                     AND substr(a.path,1,?)=? COLLATE BINARY ''' + kind_clause + '''
-            ), entries AS (
+            ), folder_entries AS (
                 SELECT substr(relative_path,1,instr(relative_path,'/')-1) AS entry_id,
                     substr(relative_path,1,instr(relative_path,'/')-1) AS entry_name,
-                    'folder' AS entry_kind,NULL AS entry_size,MAX(mtime_ns)/1e9 AS entry_modified,
-                    COUNT(*) AS child_count,1 AS is_dir
+                    MAX(mtime_ns)/1e9 AS entry_modified,COUNT(*) AS child_count
                 FROM candidates WHERE instr(relative_path,'/')>0 GROUP BY entry_name
+            '''
+            if not kind:
+                cte += ''' UNION ALL SELECT substr(path,?) AS entry_id,substr(path,?) AS entry_name,
+                    mtime_ns/1e9 AS entry_modified,0 AS child_count FROM asset_directories
+                    WHERE project_id=? AND path LIKE ? ESCAPE '\\' AND substr(path,1,?)=? COLLATE BINARY
+                    AND instr(substr(path,?),'/')=0 '''
+                arguments.extend([len(prefix)+1,len(prefix)+1,project_id,_like_prefix(prefix),len(prefix),prefix,len(prefix)+1])
+            cte += '''), entries AS (
+                SELECT entry_id,entry_name,'folder' AS entry_kind,NULL AS entry_size,
+                    COALESCE(MAX(CASE WHEN child_count>0 THEN entry_modified END),MAX(entry_modified)) AS entry_modified,
+                    MAX(child_count) AS child_count,1 AS is_dir
+                FROM folder_entries GROUP BY entry_id,entry_name
                 UNION ALL
                 SELECT id AS entry_id,relative_path AS entry_name,kind AS entry_kind,
                     size AS entry_size,mtime_ns/1e9 AS entry_modified,0 AS child_count,0 AS is_dir

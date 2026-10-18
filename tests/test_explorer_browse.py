@@ -212,6 +212,30 @@ class ExplorerBrowseTests(unittest.TestCase):
             with self.subTest(parameters=parameters), self.assertRaises(AssetLibraryError):
                 browse_assets(self.library, **parameters)
 
+    def test_empty_directories_remain_navigable_and_prune_after_scan(self):
+        (self.source / 'empty' / 'nested').mkdir(parents=True)
+        self.write('used/file.txt')
+        self.scan()
+        root = self.browse()
+        self.assertEqual([item['name'] for item in root['items']], ['empty', 'used'])
+        self.assertEqual(root['items'][0]['childCount'], 0)
+        self.assertEqual([item['name'] for item in self.browse(path='empty')['items']], ['nested'])
+        self.assertEqual(self.browse(path='empty/nested')['items'], [])
+        self.assertEqual([item['name'] for item in self.browse(kind='document')['items']], ['used'])
+        shutil.rmtree(self.source / 'empty')
+        self.scan()
+        self.assertEqual([item['name'] for item in self.browse()['items']], ['used'])
+
+    def test_directory_rows_do_not_duplicate_virtual_folders_or_pagination(self):
+        self.write('folder/deep/file.txt')
+        (self.source / 'empty').mkdir()
+        self.write('z.txt')
+        self.scan()
+        listing = self.browse(limit=1, offset=1)
+        self.assertEqual(listing['total'], 3)
+        self.assertEqual([item['name'] for item in listing['items']], ['folder'])
+        self.assertEqual(listing['items'][0]['childCount'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

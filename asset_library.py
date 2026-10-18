@@ -337,6 +337,7 @@ class AssetLibrary:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,root TEXT UNIQUE NOT NULL,name TEXT NOT NULL,options TEXT NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,stats TEXT NOT NULL DEFAULT '{}');
                 CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),path TEXT NOT NULL,size INTEGER,mtime_ns INTEGER,ctime_ns INTEGER,device INTEGER,inode INTEGER,sha256 TEXT,md5 TEXT,kind TEXT,extension TEXT,mime TEXT,metadata TEXT NOT NULL,search_text TEXT,parser_version INTEGER,dhash TEXT,color BLOB,UNIQUE(project_id,path));
+                CREATE TABLE IF NOT EXISTS asset_directories(project_id TEXT NOT NULL REFERENCES projects(id),path TEXT NOT NULL,mtime_ns INTEGER,PRIMARY KEY(project_id,path));
                 CREATE INDEX IF NOT EXISTS assets_project_kind ON assets(project_id,kind);
                 CREATE INDEX IF NOT EXISTS assets_sha256 ON assets(sha256);
                 CREATE TABLE IF NOT EXISTS identifiers(source_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,project_id TEXT NOT NULL,namespace TEXT NOT NULL,value TEXT NOT NULL,target_path TEXT NOT NULL,UNIQUE(source_id,namespace,value,target_path));
@@ -473,7 +474,7 @@ class AssetLibrary:
             data.update(fields, updatedAt=time.time())
             db.execute('UPDATE jobs SET state=?,data=? WHERE id=?', (data['state'], _json(data), identifier))
 
-    def _walk(self, root, options, stats):
+    def _walk(self, root, options, stats, directories=None):
         pending = [Path(root)]
         while pending:
             directory = pending.pop()
@@ -486,6 +487,8 @@ class AssetLibrary:
                             if entry.name.casefold() in options['skipDirs'] or Path(entry.path) == self.root:
                                 stats['skippedDirs'] += 1
                             else:
+                                if directories is not None:
+                                    directories.append((Path(entry.path).relative_to(root).as_posix(), entry.stat(follow_symlinks=False).st_mtime_ns))
                                 pending.append(Path(entry.path))
                         elif entry.is_file(follow_symlinks=False):
                             yield Path(entry.path).relative_to(root).as_posix()
@@ -562,6 +565,14 @@ class AssetLibrary:
                 'metadata': metadata, 'search': searchable, 'identifiers': identifiers, 'refs': refs, 'dhash': dhash, 'color': color}
 
     def _upsert(self, db, project_id, item):
+        existing = db.execute('SELECT id FROM assets WHERE project_id=? AND path=?',
+                              (project_id, item['relative'])).fetchone()
+        if existing:
+            item['id'] = existing['id']
+        else:
+            collision = db.execute('SELECT id FROM assets WHERE id=?', (item['id'],)).fetchone()
+            if collision:
+                item['id'] = str(uuid.uuid4())
         old = db.execute('SELECT sha256,metadata FROM assets WHERE id=?', (item['id'],)).fetchone()
         if old and old['sha256'] == item['sha256']:
             ocr = json.loads(old['metadata']).get('ocr', {})
@@ -608,7 +619,7 @@ class AssetLibrary:
             with self._db() as db:
                 previous = {row['path']: row for row in db.execute('SELECT * FROM assets WHERE project_id=?', (project_id,))}
                 remote_only = {row[0] for row in db.execute('SELECT s.asset_id FROM asset_storage s JOIN assets a ON a.id=s.asset_id WHERE a.project_id=? AND s.remote_only=1', (project_id,))}
-            pending_items, pending_bytes = [], 0
+            pending_items, pending_bytes, directories = [], 0, []
             def flush():
                 nonlocal pending_bytes
                 if pending_items:
@@ -617,7 +628,7 @@ class AssetLibrary:
                             self._upsert(db, project_id, pending_item)
                     pending_items.clear()
                     pending_bytes = 0
-            for relative in self._walk(root, options, stats):
+            for relative in self._walk(root, options, stats, directories):
                 seen.add(relative)
                 stats['discovered'] += 1
                 try:
@@ -627,6 +638,8 @@ class AssetLibrary:
                         stats['unchanged'] += 1
                     else:
                         item = self._analyze(root, relative, options, project_id)
+                        if old:
+                            item['id'] = old['id']
                         pending_items.append(item)
                         pending_bytes += len(item['search']) + sum(len(str(r)) for r in item['refs'])
                         if len(pending_items) >= 64 or pending_bytes >= 8 * 1024 ** 2:
@@ -646,6 +659,9 @@ class AssetLibrary:
                     if self.fts:
                         db.executemany('DELETE FROM asset_search WHERE id=?', [(value,) for value in stale])
                     db.executemany('DELETE FROM assets WHERE id=?', [(value,) for value in stale])
+                    db.execute('DELETE FROM asset_directories WHERE project_id=?', (project_id,))
+                    db.executemany('INSERT INTO asset_directories VALUES(?,?,?)',
+                                   [(project_id, path, mtime) for path, mtime in directories])
                     stats['pruned'] = len(stale)
             stats['elapsedSeconds'] = round(time.monotonic() - started, 3)
             with self.lock, self._db() as db:

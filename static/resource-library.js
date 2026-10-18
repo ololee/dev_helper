@@ -3,6 +3,9 @@
 const $ = id => document.getElementById(id);
 const API = '/api/resource-library';
 const PAGE_SIZE = 100;
+const FILE_DRAG_TYPE='application/x-devhelper-file-items';
+const fileOps={clipboard:null,sequence:0,busy:false,pending:null,jobs:new Map(),drag:null};
+const textViewer={editor:null,model:null,observer:null,loader:null,wrap:true,disposable:null};
 const selection = new Set();
 const folderSelection = new Set();
 const explorer = {path:'',breadcrumbs:[],history:[],index:-1,focusId:'',anchorId:'',selectionAssets:new Map(),preview:null,previewRequest:0,zoom:1};
@@ -10,7 +13,7 @@ const cloudExplorer = {entries:[],selection:new Set(),focusId:'',anchorId:'',his
 
 const kindLabels = { '':'全部资源', image:'图片', model:'模型', material:'材质', shader:'Shader', spine:'Spine', animation:'动画', audio:'音乐音效', font:'字体', scene:'场景', prefab:'预制体', code:'代码片段', document:'文档', video:'视频', archive:'压缩包', metadata:'元数据', file:'其他文件' };
 const kindIcons = {image:'image',model:'cube',material:'cube',shader:'spark',spine:'spark',animation:'spark',audio:'audio',font:'file',scene:'cube',prefab:'cube',code:'file',video:'image'};
-const states = {queued:'等待中',pending:'等待中',running:'进行中',completed:'已完成','completed-with-errors':'部分完成',failed:'失败',cancelled:'已取消',cancelling:'正在取消',interrupted:'已中断',incomplete:'未完成',skipped:'已跳过',retrying:'重试中'};
+const states = {queued:'等待中',pending:'等待中',running:'进行中',completed:'已完成','completed-with-errors':'部分完成',failed:'失败',cancelled:'已取消',cancelling:'正在取消',interrupted:'已中断',incomplete:'未完成',skipped:'已跳过',retrying:'重试中',unknown:'需核对'};
 let sortField='name',sortOrder='asc';
 let entries=[],projectItems=[],current=null,kind='',offset=0,total=0,view='list',assetRequest=0,detailRequest=0,oauthState='',cloudOffset=0,cloudHasMore=false,cloudScopeRoot='',table,cloudTable,tableReady,cloudTableReady,modelConfig={},currentTab='library',actionWork=null,jobTimer=null,scanTimer=null,scanBusy=false,activeAiJobs=[],aiPollBusy=false,cloudRequest=0;
 const backupState={assetIds:[],plan:null,input:null,request:0,submitting:false};
@@ -25,15 +28,15 @@ function stateOf(job){return job.state||job.status||'pending';}
 function running(job){return ['queued','pending','running','cancelling','retrying'].includes(stateOf(job));}
 function safeUrl(value,prefix='/api/'){try{const url=new URL(value,location.origin);return url.origin===location.origin&&url.pathname.startsWith(prefix)?url.href:'';}catch{return '';}}
 function notice(text,error=false){$('notice-text').textContent=text;$('notice').hidden=!text;$('notice').classList.toggle('error',error);}
-async function api(path,data){const response=await fetch(path,data===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let value;try{value=await response.json();}catch{throw new Error('服务返回了无法读取的响应，请刷新重试。');}if(!response.ok){const error=new Error(value.error||value.message||'操作未完成（'+response.status+'）');error.status=response.status;throw error;}return value;}
+async function api(path,data){const response=await fetch(path,data===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let value;try{value=await response.json();}catch{throw new Error('服务返回了无法读取的响应，请刷新重试。');}if(!response.ok){const error=new Error(value.error||value.message||'操作未完成（'+response.status+'）');error.status=response.status;error.details=value;throw error;}return value;}
 async function run(work){try{return await work();}catch(error){notice(error.message||'操作未完成',true);return null;}}
 function disabledWhile(el,work){return async()=>{el.disabled=true;try{await work();}finally{el.disabled=false;}};}
-function tab(name){currentTab=name;for(const key of ['library','cloud','history']){$(key).hidden=key!==name;$('tab-'+key).setAttribute('aria-selected',String(key===name));}if(name==='cloud')run(async()=>{const c=await loadCloudConfig();if(c.authorized)await loadCloud();else{$('cloud-table').hidden=true;$('cloud-empty').hidden=false;$('cloud-empty').querySelector('h2').textContent='先连接你的百度网盘';$('cloud-empty').querySelector('p').textContent='点击「账号与授权」，填写应用信息并完成百度账号授权。';}});if(name==='history')run(loadJobs);if(name==='library'&&table)requestAnimationFrame(()=>table.redraw(true));}
+function tab(name){currentTab=name;for(const key of ['library','cloud','history']){$(key).hidden=key!==name;$('tab-'+key).setAttribute('aria-selected',String(key===name));}if(name==='cloud')run(async()=>{const c=await loadCloudConfig();if(c.authorized)await loadCloud();else{$('cloud-table').hidden=true;$('cloud-empty').hidden=false;$('cloud-empty').querySelector('h2').textContent='先连接你的百度网盘';$('cloud-empty').querySelector('p').textContent='点击「账号与授权」，填写应用信息并完成百度账号授权。';}});if(name==='history')run(loadJobs);updateFileCommands();if(name==='library'&&table)requestAnimationFrame(()=>table.redraw(true));}
 function openInspector(show=true){$('inspector').hidden=!show;$('toggle-inspector').setAttribute('aria-pressed',String(show));if(table)requestAnimationFrame(()=>table.redraw(true));}
 function projectName(){return projectItems.find(p=>p.id===$('project').value)?.name||'全部工程';}
 function selectedInfo(){
   const count=selection.size,folders=folderSelection.size,allCount=count+folders;$('selected').textContent=allCount?'已选 '+allCount+' 项'+(folders?'（'+count+' 个文件）':''):'未选择项目';$('clear').disabled=!allCount;$('backup').disabled=!count||count>100;$('backup').title=count>100?'每次最多上传100条，可分批处理':'预览分类并上传选中资源到网盘';
-  const all=entries.length>0&&entries.every(a=>isSelected(a.id));$('select-page').checked=all;$('select-page').indeterminate=!all&&entries.some(a=>isSelected(a.id));const canStart=$('task-scope').value==='project'?!!$('project').value:!!count;for(const id of ['embed','classify','both'])$(id).disabled=!canStart;$('open-selected').disabled=allCount!==1;
+  const all=entries.length>0&&entries.every(a=>isSelected(a.id));$('select-page').checked=all;$('select-page').indeterminate=!all&&entries.some(a=>isSelected(a.id));const canStart=$('task-scope').value==='project'?!!$('project').value:!!count;for(const id of ['embed','classify','both'])$(id).disabled=!canStart;$('open-selected').disabled=allCount!==1;updateFileCommands();
 }
 function toggleSelection(id,checked){
   const asset=entries.find(a=>a.id===id)||explorer.selectionAssets.get(id),target=isFolder(asset)?folderSelection:selection;
@@ -41,8 +44,8 @@ function toggleSelection(id,checked){
   checked?target.add(id):target.delete(id);if(checked&&asset)explorer.selectionAssets.set(id,asset);selectedInfo();syncSelection();return true;
 }
 function syncSelection(){
-  if(table)table.getRows().forEach(row=>{const id=row.getData().id,el=row.getElement();el.classList.toggle('tabulator-selected',isSelected(id));el.classList.toggle('file-focused',id===explorer.focusId);el.setAttribute('aria-selected',String(isSelected(id)));const input=el.querySelector('input.asset-check');if(input)input.checked=isSelected(id);});
-  $('asset-grid').querySelectorAll('.asset-card').forEach(card=>{card.classList.toggle('selected',isSelected(card.dataset.id));card.classList.toggle('file-focused',card.dataset.id===explorer.focusId);card.setAttribute('aria-selected',String(isSelected(card.dataset.id)));card.querySelector('input').checked=isSelected(card.dataset.id);});
+  if(table)table.getRows().forEach(row=>{const id=row.getData().id,el=row.getElement();el.classList.toggle('tabulator-selected',isSelected(id));el.classList.toggle('file-focused',id===explorer.focusId);el.setAttribute('aria-selected',String(isSelected(id)));const input=el.querySelector('input.asset-check');if(input)input.checked=isSelected(id);el.classList.toggle('cut-entry',isCutEntry(row.getData(),'local'));});
+  $('asset-grid').querySelectorAll('.asset-card').forEach(card=>{card.classList.toggle('selected',isSelected(card.dataset.id));card.classList.toggle('file-focused',card.dataset.id===explorer.focusId);card.setAttribute('aria-selected',String(isSelected(card.dataset.id)));card.querySelector('input').checked=isSelected(card.dataset.id);const asset=entries.find(item=>item.id===card.dataset.id);card.classList.toggle('cut-entry',isCutEntry(asset,'local'));});
 }
 function isFolder(asset){return !!asset&&(asset.isDir===true||asset.type==='folder');}
 function isSelected(id){return selection.has(id)||folderSelection.has(id);}
@@ -72,7 +75,7 @@ function buildTables(){
     {title:'类型',field:'kind',width:100,formatter:cell=>isFolder(cell.getRow().getData())?'文件夹':kindLabels[cell.getValue()]||cell.getValue()||'文件'},
     {title:'大小',field:'bytes',width:90,hozAlign:'right',formatter:cell=>isFolder(cell.getRow().getData())?'':bytes(cell.getValue())},
     {title:'状态',field:'_status',minWidth:112,widthGrow:1,formatter:cell=>isFolder(cell.getRow().getData())?node('span',cell.getRow().getData().childCount!==undefined?cell.getRow().getData().childCount+' 项':'','hint'):aiStatus(cell.getRow().getData())}
-  ],rowFormatter:row=>{const asset=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',isSelected(asset.id));el.classList.toggle('file-focused',asset.id===explorer.focusId);el.setAttribute('aria-selected',String(isSelected(asset.id)));el.title=asset.path||asset.name||'';}});
+  ],rowFormatter:row=>{const asset=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',isSelected(asset.id));el.classList.toggle('file-focused',asset.id===explorer.focusId);el.setAttribute('aria-selected',String(isSelected(asset.id)));el.title=asset.path||asset.name||'';installFileDrag(el,asset,'local');}});
   tableReady=new Promise(resolve=>table.on('tableBuilt',resolve));
   table.on('rowClick',(event,row)=>selectionClick(event,row.getData()));
   table.on('rowDblClick',(event,row)=>{if(!event.target.closest('input,button,a'))run(()=>openEntry(row.getData()));});
@@ -83,11 +86,11 @@ function buildTables(){
     {title:'修改日期',field:'modifiedAt',width:145,formatter:cell=>time(cell.getValue(),true)},
     {title:'类型',field:'extension',width:115,formatter:cell=>cell.getRow().getData().isDir?'文件夹':cell.getValue()||'文件'},
     {title:'大小',field:'bytes',width:100,hozAlign:'right',formatter:cell=>cell.getRow().getData().isDir?'':bytes(cell.getValue())}
-  ],rowFormatter:row=>{const f=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',cloudExplorer.selection.has(f.path));el.classList.toggle('file-focused',cloudExplorer.focusId===f.path);el.setAttribute('aria-selected',String(cloudExplorer.selection.has(f.path)));}});
+  ],rowFormatter:row=>{const f=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',cloudExplorer.selection.has(f.path));el.classList.toggle('file-focused',cloudExplorer.focusId===f.path);el.setAttribute('aria-selected',String(cloudExplorer.selection.has(f.path)));installFileDrag(el,f,'netdisk');}});
   cloudTableReady=new Promise(resolve=>cloudTable.on('tableBuilt',resolve));
   cloudTable.on('rowClick',(event,row)=>selectCloud(row.getData(),event));cloudTable.on('rowDblClick',(event,row)=>run(()=>cloudAction(row.getData())));cloudTable.on('rowContext',(event,row)=>{event.preventDefault();showContext(event,row.getData(),'cloud');});
 }
-function renderGrid(){const root=$('asset-grid');root.replaceChildren();for(const asset of entries){const card=node('article',undefined,'asset-card'+(isSelected(asset.id)?' selected':'')+(asset.id===explorer.focusId?' file-focused':''));card.dataset.id=asset.id;card.setAttribute('aria-label',asset.name);card.setAttribute('aria-selected',String(isSelected(asset.id)));const check=node('input',undefined,'card-check');check.type='checkbox';check.checked=isSelected(asset.id);check.setAttribute('aria-label','选择 '+asset.name);check.onclick=e=>e.stopPropagation();check.onchange=()=>{explorer.focusId=asset.id;explorer.anchorId=asset.id;if(!toggleSelection(asset.id,check.checked))check.checked=false;};const preview=node('div',undefined,'card-preview');preview.append(thumb(asset,''));const body=node('div',undefined,'card-body'),name=node('span',asset.name,'file-name');name.title=asset.path||asset.name;body.append(name);const meta=node('div',undefined,'card-meta');meta.append(node('span',isFolder(asset)?'文件夹':kindLabels[asset.kind]||asset.kind),node('span',isFolder(asset)?'':bytes(asset.bytes)));body.append(meta);if(!isFolder(asset))body.append(aiStatus(asset));card.append(check,preview,body);card.onclick=e=>selectionClick(e,asset);card.ondblclick=e=>{if(!e.target.closest('input'))run(()=>openEntry(asset));};card.oncontextmenu=e=>{e.preventDefault();showContext(e,asset,'library');};root.append(card);}}
+function renderGrid(){const root=$('asset-grid');root.replaceChildren();for(const asset of entries){const card=node('article',undefined,'asset-card'+(isSelected(asset.id)?' selected':'')+(asset.id===explorer.focusId?' file-focused':''));card.dataset.id=asset.id;card.setAttribute('aria-label',asset.name);card.setAttribute('aria-selected',String(isSelected(asset.id)));const check=node('input',undefined,'card-check');check.type='checkbox';check.checked=isSelected(asset.id);check.setAttribute('aria-label','选择 '+asset.name);check.onclick=e=>e.stopPropagation();check.onchange=()=>{explorer.focusId=asset.id;explorer.anchorId=asset.id;if(!toggleSelection(asset.id,check.checked))check.checked=false;};const preview=node('div',undefined,'card-preview');preview.append(thumb(asset,''));const body=node('div',undefined,'card-body'),name=node('span',asset.name,'file-name');name.title=asset.path||asset.name;body.append(name);const meta=node('div',undefined,'card-meta');meta.append(node('span',isFolder(asset)?'文件夹':kindLabels[asset.kind]||asset.kind),node('span',isFolder(asset)?'':bytes(asset.bytes)));body.append(meta);if(!isFolder(asset))body.append(aiStatus(asset));card.append(check,preview,body);installFileDrag(card,asset,'local');card.onclick=e=>selectionClick(e,asset);card.ondblclick=e=>{if(!e.target.closest('input'))run(()=>openEntry(asset));};card.oncontextmenu=e=>{e.preventDefault();showContext(e,asset,'library');};root.append(card);}}
 function setView(next){view=next;$('asset-table').hidden=next!=='list';$('asset-grid').hidden=next!=='grid';$('view-list').setAttribute('aria-pressed',String(next==='list'));$('view-grid').setAttribute('aria-pressed',String(next==='grid'));if(next==='list')table.redraw(true);else renderGrid();}
 function renderCategories(){for(const [value,label] of Object.entries(kindLabels)){if(['metadata','file','archive','document','video'].includes(value))continue;const el=button(label,async()=>{await navigateLocal({projectId:$('project').value,path:'',kind:value,query:'',mode:'text'});});el.dataset.kind=value;el.prepend(icon(value?kindIcons[value]||'file':'library'));$('categories').append(el);}renderCategoryState();}
 function renderCategoryState(){$('categories').querySelectorAll('button').forEach(el=>el.classList.toggle('active',el.dataset.kind===kind));$('kind-heading').textContent=kindLabels[kind]||kind;}
@@ -106,6 +109,101 @@ async function loadAssets(){
     $('sort-hint').textContent=payload.mode==='semantic'?'按相关程度排列 · 双击打开':'单击选择 · 双击打开 · 右键更多操作';renderNavigation();selectedInfo();syncSelection();if(view==='list'&&entries.length)requestAnimationFrame(()=>table.redraw(true));
   }finally{if(request===assetRequest){$('asset-loading').hidden=true;$('asset-content').setAttribute('aria-busy','false');}}
 }
+function fileScope(){return currentTab==='cloud'?'netdisk':'local';}
+function operationEntries(scope=fileScope()){
+  if(scope==='netdisk')return cloudExplorer.entries.filter(item=>cloudExplorer.selection.has(item.path));
+  return [...new Set([...selection,...folderSelection])].map(id=>entries.find(item=>item.id===id)||explorer.selectionAssets.get(id)).filter(Boolean);
+}
+function managementRef(asset,scope){
+  if(scope==='netdisk'){if(asset?.canManage===false||!asset?.path||cloudPathValue(asset.path)==='')return null;return {path:asset.path,...(asset.fsId?{fsId:String(asset.fsId)}:{})};}
+  if(asset?.canManage!==true||!asset.projectId||!asset.path||asset.storage?.state==='remote-only'||asset.storage?.state==='cached')return null;return {projectId:asset.projectId,path:asset.path};
+}
+function destinationRef(scope=fileScope(),folder=null){
+  if(scope==='netdisk')return {path:folder?.path??$('remote-dir').value};
+  const projectId=folder?.projectId||$('project').value,path=folder?.path??explorer.path,project=projectItems.find(item=>item.id===projectId);if(!projectId||project?.remoteBacked===true||project?.source==='cloud'||project?.canManage===false)return null;return {projectId,path};
+}
+function managedSelection(scope=fileScope()){const selected=operationEntries(scope);return selected.length>0&&selected.every(asset=>!!managementRef(asset,scope));}
+function itemKey(scope,item){return scope+':'+(item.projectId||'')+':'+item.path;}
+function isCutEntry(asset,scope){const clipboard=fileOps.clipboard,ref=managementRef(asset,scope);return !!ref&&clipboard?.scope===scope&&clipboard.operation==='move'&&clipboard.items.some(item=>itemKey(scope,item)===itemKey(scope,ref));}
+function updateFileCommands(){
+  for(const scope of ['local','netdisk']){const prefix=scope==='local'?'file':'cloud',chosen=operationEntries(scope),manageable=managedSelection(scope),target=destinationRef(scope);for(const action of ['copy','cut','delete'])$(prefix+'-'+action).disabled=fileOps.busy||!manageable;$(prefix+'-rename').disabled=fileOps.busy||!manageable||!chosen.length;$(prefix+'-paste').disabled=fileOps.busy||!target||!fileOps.clipboard||fileOps.clipboard.scope!==scope;const clip=fileOps.clipboard;$(prefix+'-clipboard').textContent=clip?.scope===scope?(clip.operation==='move'?'待移动 ':'已复制 ')+clip.items.length+' 项，打开目标文件夹后粘贴':'';}
+}
+function setFileClipboard(operation,scope=fileScope()){
+  const chosen=operationEntries(scope);if(!chosen.length||!chosen.every(asset=>managementRef(asset,scope)))throw new Error(scope==='local'?'请只选择可管理的本机文件或文件夹；工程根目录与云索引不可剪切或复制。':'请先选择应用目录中的文件或文件夹。');
+  fileOps.clipboard={id:++fileOps.sequence,scope,operation,items:chosen.map(asset=>managementRef(asset,scope)),entries:chosen.map(asset=>({...asset}))};syncSelection();syncCloudSelection();updateFileCommands();notice((operation==='move'?'已剪切 ':'已复制 ')+chosen.length+' 项。打开目标目录后粘贴。');
+}
+async function pasteFiles(scope=fileScope(),folder=null){const clipboard=fileOps.clipboard,target=destinationRef(scope,folder);if(!clipboard)throw new Error('请先选择文件并复制或剪切。');if(clipboard.scope!==scope)throw new Error('本机和百度网盘分别管理，请在相同位置粘贴。');if(!target)throw new Error('请打开一个可管理的工程目录作为目标。');await prepareFileOperation({scope,operation:clipboard.operation,items:clipboard.items.map(item=>({...item})),destination:target},clipboard.entries,clipboard.id);}
+function renameFile(scope=fileScope()){
+  const chosen=operationEntries(scope);if(!chosen.length||!chosen.every(asset=>managementRef(asset,scope)))throw new Error('请选择可管理的文件或文件夹。');const asset=chosen[0],batch=chosen.length>1;
+  showAction({title:batch?'批量重命名':'重命名',description:batch?'已选 '+chosen.length+' 项。支持 {name} 原名称（不含扩展名）、{index} 从 1 开始的序号、{ext} 扩展名（含点，文件夹为空）。下一步预览每项新名称。':'更改名称，同名项目不会被覆盖。',label:batch?'名称模板':'新名称',value:batch?'{name}_{index}{ext}':asset.name,submit:batch?'预览重命名':'重命名',work:async name=>{if(!name||!batch&&name===asset.name)return;if(/[\\/\0\r\n]/.test(name)||name==='.'||name==='..')throw new Error('名称不能包含目录分隔符。');await prepareFileOperation({scope,operation:'rename',items:chosen.map(item=>managementRef(item,scope)),name},chosen);}});
+  setTimeout(()=>{$('action-value').focus();const value=$('action-value').value,last=value.lastIndexOf('.');$('action-value').setSelectionRange?.(0,last>0&&!batch&&!isFolder(asset)?last:value.length);},0);
+}
+async function deleteFiles(scope=fileScope()){const chosen=operationEntries(scope);if(!chosen.length||!chosen.every(asset=>managementRef(asset,scope)))throw new Error('请只选择可管理的文件或文件夹。');await prepareFileOperation({scope,operation:'trash',items:chosen.map(asset=>managementRef(asset,scope))},chosen);}
+function operationItemCount(pending){return pending.plan?.items?.length||pending.chosen.length;}
+function operationName(value){return {copy:'复制',move:'移动',rename:'重命名',trash:'删除',restore:'恢复'}[value]||'文件操作';}
+function operationPath(value){if(typeof value==='string')return value;if(value&&typeof value==='object')return [value.projectName||projectItems.find(item=>item.id===value.projectId)?.name||value.projectId,value.path||value.name].filter(Boolean).join(' / ');return '';}
+function planTarget(item){return operationPath(item.destination||item.target||item.targetPath||item.destinationPath||item.to||'');}
+function planSource(item){return operationPath(item.source||item.item||item.sourcePath||item.path||item.from||'');}
+function showOperationPlan(plan,payload,chosen,{failed=false,error=''}={}){
+  const label=operationName(payload.operation),planned=Array.isArray(plan?.items)&&plan.items.length?plan.items:chosen.map(asset=>({name:asset.name,source:{path:asset.path},isDir:isFolder(asset)})),count=planned.length,companions=planned.filter(item=>item.companionOf).length;
+  $('file-operation-title').textContent=failed?'无法'+label+'所选项目':label+' '+count+' 项';const destination=operationPath(payload.destination);
+  $('file-operation-description').textContent=failed?error:payload.operation==='rename'?(chosen.length>1?'按模板「'+payload.name+'」重命名 '+chosen.length+' 项，请核对下列原名称和新名称。':'将「'+chosen[0].name+'」重命名为「'+payload.name+'」。'):label+' '+count+' 个文件或文件夹'+(destination?'到「'+destination+'」':'')+'。';
+  const root=$('file-operation-items');root.replaceChildren();planned.forEach((item,index)=>{const row=node('div',undefined,'operation-preview-item');row.setAttribute('role','listitem');row.append(icon(item.isDir||item.isDirectory?'folder':'file'));const copy=node('div');const name=item.name||chosen[index]?.name||planSource(item).split('/').pop()||'项目';copy.append(node('strong',name),node('span',planSource(item)||chosen[index]?.path||'','operation-source'));if(item.companionOf)copy.append(badge('关联 Unity 元文件'));const target=planTarget(item);if(target)copy.append(node('span','→ '+target,'operation-target'));row.append(copy);root.append(row);});
+  const warnings=[];for(const conflict of Array.isArray(plan?.conflicts)?plan.conflicts:[])warnings.push(typeof conflict==='string'?conflict:conflict.message||conflict.path||'存在同名项目');if(companions)warnings.push('已包含 '+companions+' 个关联的 Unity .meta 文件，避免资源引用失配。');if(payload.operation==='trash')warnings.push(payload.scope==='netdisk'?'移至百度网盘回收站，保留策略以百度为准。':'移入 DevHelper 回收站，完成后可以撤销删除。');if(payload.operation==='move')warnings.push('移动完成后，源目录中的项目会移到目标目录。');if(error&&!failed)warnings.push(error);$('file-operation-warning').textContent=warnings.join('\n');$('file-operation-execute').textContent=label;$('file-operation-execute').classList.toggle('danger',payload.operation==='trash');$('file-operation-execute').hidden=failed||!!plan?.conflicts?.length;$('file-operation-execute').disabled=fileOps.busy;
+}
+async function prepareFileOperation(payload,chosen,clipboardId=null){
+  if(fileOps.busy)return;fileOps.busy=true;updateFileCommands();notice('正在检查所选文件和目标目录…');
+  try{
+    const plan=await api(API+'/file-ops/plan',payload);notice('');if(!plan.planId||!plan.planDigest)throw new Error('服务未返回完整操作预览，请重试。');fileOps.pending={plan,payload,chosen,clipboardId};showOperationPlan(plan,payload,chosen);
+    if(plan.conflicts?.length||['move','trash'].includes(payload.operation)||(payload.operation==='rename'&&chosen.length>1)){$('file-operation-dialog').showModal();return;}
+    await executeFilePlan();
+  }catch(error){showOperationPlan(error.details||null,payload,chosen,{failed:true,error:error.message});fileOps.pending=null;if(!$('file-operation-dialog').open)$('file-operation-dialog').showModal();throw error;}
+  finally{fileOps.busy=false;$('file-operation-execute').disabled=false;updateFileCommands();}
+}
+async function executeFilePlan(){
+  const pending=fileOps.pending;if(!pending)return;fileOps.busy=true;$('file-operation-execute').disabled=true;updateFileCommands();
+  try{const job=await api(API+'/file-ops/execute',{planId:pending.plan.planId,planDigest:pending.plan.planDigest}),id=String(job.jobId||job.id||'');if(!id)throw new Error('未返回文件操作任务编号。');fileOps.pending=null;$('file-operation-dialog').close();fileOps.jobs.set(id,{id,pending,job,timer:null,polling:false});renderFileJob(job,pending);await pollFileJob(id);}
+  catch(error){$('file-operation-warning').textContent=error.status===409?'目录或文件已有变化，请关闭后重新操作。不会覆盖现有文件。':error.message;throw error;}
+  finally{fileOps.busy=false;$('file-operation-execute').disabled=false;updateFileCommands();}
+}
+function fileJobItems(job){return job.result?.items||job.items||[];}
+function renderFileJob(job,pending){
+  const label=operationName(pending.payload.operation),items=fileJobItems(job);$('file-operation-status').hidden=false;$('file-operation-status-title').textContent=label+' · '+(states[stateOf(job)]||stateOf(job));$('file-operation-status-summary').textContent=(job.error||'')||(running(job)?'正在处理 '+operationItemCount(pending)+' 项，可继续浏览其他目录。':stateOf(job)==='completed'?'已完成 '+operationItemCount(pending)+' 项。':'请查看每个项目的处理结果，未成功的剪切项目仍保留。');
+  const root=$('file-operation-status-items');root.replaceChildren();const rows=items.length?items:pending.chosen.map(asset=>({name:asset.name,path:asset.path,state:stateOf(job)}));
+  rows.forEach((item,index)=>{const row=node('div',undefined,'operation-result-item'),text=node('div');text.append(node('strong',item.name||pending.chosen[index]?.name||planSource(item)||'项目'),node('span',item.error||planTarget(item)||planSource(item),'operation-result-path'));if(item.warning)text.append(node('span',item.warning,'operation-result-path'));if(item.recovery?.message)text.append(node('span',item.recovery.message,'operation-result-path'));row.append(text,badge(states[item.state]||item.state||'等待中',item.state==='completed'?'ready':item.state==='failed'?'stale':''));if(item.trashId&&pending.payload.scope==='local'&&item.state==='completed')row.append(button('撤销删除',()=>restoreFile(item.trashId,{...pending.chosen[index],...item}),'text-button'));root.append(row);});
+}
+async function pollFileJob(id){
+  const active=fileOps.jobs.get(id);if(!active||active.polling)return;active.polling=true;clearTimeout(active.timer);
+  try{const job=await api(API+'/file-ops/jobs/'+encodeURIComponent(id));active.job=job;renderFileJob(job,active.pending);if(running(job)){active.timer=setTimeout(()=>run(()=>pollFileJob(id)),1100);return;}
+    if(active.pending.payload.operation==='move'&&fileOps.clipboard?.id===active.pending.clipboardId){
+      const clipboard=fileOps.clipboard,scope=clipboard.scope,receipts=fileJobItems(job),sourceRef=item=>{const source=item.source;if(scope==='netdisk')return typeof source==='string'?{path:source,...(item.fsId?{fsId:String(item.fsId)}:{})}:null;return source&&typeof source==='object'&&source.projectId&&source.path?{projectId:source.projectId,path:source.path}:null;};
+      const outcomes=new Map(receipts.map(item=>{const ref=sourceRef(item);return ref?[itemKey(scope,ref),item]:null;}).filter(Boolean));
+      const retained=clipboard.items.filter(item=>outcomes.get(itemKey(scope,item))?.state!=='completed');
+      for(const item of receipts){const ref=sourceRef(item);if(ref&&item.state!=='completed'&&!retained.some(entry=>itemKey(scope,entry)===itemKey(scope,ref)))retained.push(ref);}
+      if(stateOf(job)==='completed')retained.length=0;
+      const retryEntries=retained.map(ref=>{const existing=clipboard.entries.find(asset=>{const candidate=managementRef(asset,scope);return candidate&&itemKey(scope,candidate)===itemKey(scope,ref);});if(existing)return existing;const receipt=outcomes.get(itemKey(scope,ref))||{};return {...ref,name:receipt.name||ref.path.split('/').pop(),isDir:!!(receipt.isDir||receipt.isDirectory),type:receipt.isDir||receipt.isDirectory?'folder':'file',canManage:true,id:'file-retry:'+itemKey(scope,ref)};});
+      fileOps.clipboard=retained.length?{...clipboard,items:retained,entries:retryEntries}:null;
+    }
+    if(!active.refreshed){active.refreshed=true;if(currentTab==='library'){clearSelection();await loadAssets();}else if(currentTab==='cloud'){cloudExplorer.selection.clear();await loadCloud();}syncSelection();syncCloudSelection();updateFileCommands();}
+  }catch(error){$('file-operation-status-summary').textContent='暂时无法读取进度：'+error.message;active.timer=setTimeout(()=>run(()=>pollFileJob(id)),2500);}
+  finally{active.polling=false;}
+}
+async function restoreFile(trashId,asset){const job=await api(API+'/file-ops/restore',{trashId}),id=String(job.jobId||job.id||'');if(!id)throw new Error('未返回恢复任务编号。');const pending={payload:{scope:'local',operation:'restore'},chosen:[asset],clipboardId:null};fileOps.jobs.set(id,{id,pending,job,timer:null,polling:false});await pollFileJob(id);}
+function addFileContextCommands(add,scope,asset){
+  const chosen=operationEntries(scope),canManage=chosen.length>0&&chosen.every(item=>managementRef(item,scope));add('剪切',()=>setFileClipboard('move',scope),'Ctrl+X',!canManage);add('复制',()=>setFileClipboard('copy',scope),'Ctrl+C',!canManage);const destination=isFolder(asset)?destinationRef(scope,asset):destinationRef(scope);add('粘贴'+(isFolder(asset)?'到此文件夹':''),()=>pasteFiles(scope,isFolder(asset)?asset:null),'Ctrl+V',!destination||fileOps.clipboard?.scope!==scope);add('重命名',()=>renameFile(scope),'F2',!canManage||!chosen.length);add('删除',()=>deleteFiles(scope),'Delete',!canManage);
+}
+function installFileDrag(element,asset,scope){
+  element.draggable=!!managementRef(asset,scope);element.classList.toggle('cut-entry',isCutEntry(asset,scope));
+  element.ondragstart=event=>{if(!managementRef(asset,scope)){event.preventDefault();return;}if(scope==='local'&&!isSelected(asset.id))selectEntry(asset,{});if(scope==='netdisk'&&!cloudExplorer.selection.has(asset.path))selectCloud(asset,{});const chosen=operationEntries(scope);if(!chosen.every(item=>managementRef(item,scope))){event.preventDefault();return;}const token=String(++fileOps.sequence)+'-'+Date.now();fileOps.drag={token,scope,entries:chosen.map(item=>({...item})),items:chosen.map(item=>managementRef(item,scope))};event.dataTransfer.setData(FILE_DRAG_TYPE,token);event.dataTransfer.effectAllowed='copyMove';};
+  element.ondragend=()=>{fileOps.drag=null;document.querySelectorAll('.file-drop-target').forEach(item=>item.classList.remove('file-drop-target'));};
+  if(isFolder(asset)){element.ondragover=event=>fileDragOver(event,scope,asset,element);element.ondragleave=()=>element.classList.remove('file-drop-target');element.ondrop=event=>fileDrop(event,scope,asset,element);}
+}
+function ownDrag(event,scope){return !!fileOps.drag&&fileOps.drag.scope===scope&&Array.from(event.dataTransfer?.types||[]).includes(FILE_DRAG_TYPE);}
+function fileDragOver(event,scope,folder=null,element=null){if(!ownDrag(event,scope)){if(Array.from(event.dataTransfer?.types||[]).includes('Files')){event.preventDefault();event.dataTransfer.dropEffect='none';}return;}if(!destinationRef(scope,folder))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=event.ctrlKey||event.altKey||event.metaKey?'copy':'move';element?.classList.add('file-drop-target');}
+function fileDrop(event,scope,folder=null,element=null){
+  element?.classList.remove('file-drop-target');if(!ownDrag(event,scope)){if(Array.from(event.dataTransfer?.types||[]).includes('Files')){event.preventDefault();notice('外部文件请使用上传入口；拖放不会移动或删除原文件。');}return;}const drag=fileOps.drag;if(event.dataTransfer.getData(FILE_DRAG_TYPE)!==drag.token)return;const target=destinationRef(scope,folder);if(!target)return;event.preventDefault();event.stopPropagation();fileOps.drag=null;const operation=event.ctrlKey||event.altKey||event.metaKey?'copy':'move';run(()=>prepareFileOperation({scope,operation,items:drag.items,destination:target},drag.entries));
+}
+
 function localLocation(){return {projectId:$('project').value,path:explorer.path,kind,query:$('query').value.trim(),mode:$('search-mode').value};}
 function sameLocation(a,b){return !!a&&['projectId','path','kind','query','mode'].every(k=>(a[k]||'')===(b[k]||''));}
 function pushLocalHistory(value){if(sameLocation(explorer.history[explorer.index],value))return;explorer.history=explorer.history.slice(0,explorer.index+1);explorer.history.push({...value});if(explorer.history.length>100)explorer.history.shift();explorer.index=explorer.history.length-1;}
@@ -133,6 +231,31 @@ async function openEntry(asset){
   if(!asset)return;closeContext();if(isFolder(asset)){await navigateLocal({projectId:asset.projectId||asset.id,path:asset.path||'',query:'',kind:'',mode:'text'});return;}
   await showPreview(asset);
 }
+function textLanguage(asset){
+  const extension=String(asset.extension||asset.name?.split('.').pop()||'').replace(/^\./,'').toLowerCase(),map={txt:'plaintext',md:'markdown',markdown:'markdown',js:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',jsx:'javascript',json:'json',jsonc:'json',py:'python',cs:'csharp',lua:'lua',shader:'cpp',cginc:'cpp',hlsl:'cpp',glsl:'cpp',c:'c',h:'c',cc:'cpp',cpp:'cpp',hpp:'cpp',kt:'kotlin',java:'java',xml:'xml',html:'html',htm:'html',svg:'xml',css:'css',scss:'scss',less:'less',yaml:'yaml',yml:'yaml',toml:'ini',ini:'ini',sh:'shell',bash:'shell',zsh:'shell',bat:'bat',cmd:'bat',ps1:'powershell',sql:'sql',rs:'rust',go:'go',swift:'swift',php:'php',rb:'ruby',r:'r',csv:'plaintext',meta:'yaml',atlas:'plaintext',prefab:'yaml',unity:'yaml',mat:'yaml',asset:'yaml'};return map[extension]||'plaintext';
+}
+function disposeTextViewer(){textViewer.observer?.disconnect();textViewer.observer=null;textViewer.disposable?.dispose();textViewer.disposable=null;textViewer.editor?.dispose();textViewer.editor=null;textViewer.model?.dispose();textViewer.model=null;$('preview-editor-status').hidden=true;}
+function loadMonaco(){
+  if(window.monaco?.editor)return Promise.resolve(window.monaco);if(textViewer.loader)return textViewer.loader;
+  textViewer.loader=new Promise((resolve,reject)=>{
+    window.MonacoEnvironment={getWorkerUrl:()=>new URL('/static/vendor/monaco/vs/base/worker/workerMain.js',location.origin).href};
+    const start=()=>{try{window.require.config({paths:{vs:'/static/vendor/monaco/vs'},preferScriptTags:true});window.require(['vs/editor/editor.main'],()=>resolve(window.monaco),reject);}catch(error){reject(error);}};
+    if(window.require?.config){start();return;}const script=node('script');script.src='/static/vendor/monaco/vs/loader.js';script.async=true;script.onload=start;script.onerror=()=>reject(new Error('本地代码查看器资源未能加载。'));document.head.append(script);
+  }).catch(error=>{textViewer.loader=null;throw error;});return textViewer.loader;
+}
+async function renderTextViewer(text,asset,request,truncated){
+  const root=$('preview-content');root.replaceChildren();const host=node('div',undefined,'code-editor-host');host.setAttribute('aria-label','只读代码预览：'+asset.name);root.append(host);const language=textLanguage(asset);$('preview-editor-status').hidden=false;$('preview-editor-status').textContent=language+' · UTF-8 · 只读'+(truncated?' · 前 1 MB':'');
+  try{
+    const monaco=await loadMonaco();if(request!==explorer.previewRequest||!$('preview-dialog').open)return;
+    if(monaco.languages.typescript){for(const defaults of [monaco.languages.typescript.javascriptDefaults,monaco.languages.typescript.typescriptDefaults])defaults?.setDiagnosticsOptions({noSemanticValidation:true,noSyntaxValidation:true,noSuggestionDiagnostics:true});}
+    const registered=monaco.languages.getLanguages().some(item=>item.id===language)?language:'plaintext';textViewer.model=monaco.editor.createModel(text,registered,monaco.Uri.parse('inmemory://devhelper/'+request+'/'+encodeURIComponent(asset.name||'file.txt')));
+    textViewer.editor=monaco.editor.create(host,{model:textViewer.model,theme:'vs-dark',readOnly:true,domReadOnly:true,contextmenu:true,lineNumbers:'on',folding:true,showFoldingControls:'always',minimap:{enabled:false},wordWrap:textViewer.wrap?'on':'off',fontFamily:'Cascadia Code, SFMono-Regular, Consolas, monospace',fontSize:13,lineHeight:22,scrollBeyondLastLine:false,smoothScrolling:false,renderValidationDecorations:'off',automaticLayout:false,links:false,stickyScroll:{enabled:false},padding:{top:15,bottom:20},selectionHighlight:true,occurrencesHighlight:'off',ariaLabel:'只读资源代码，使用 Control 或 Command 加 F 搜索'});
+    const updateStatus=()=>{const position=textViewer.editor?.getPosition();$('preview-editor-status').textContent=registered+' · UTF-8 · 只读'+(position?' · 行 '+position.lineNumber+'，列 '+position.column:'')+(truncated?' · 前 1 MB':'');};textViewer.disposable=textViewer.editor.onDidChangeCursorPosition(updateStatus);updateStatus();
+    const layout=()=>textViewer.editor?.layout();if(typeof ResizeObserver==='function'){textViewer.observer=new ResizeObserver(layout);textViewer.observer.observe(host);}requestAnimationFrame(layout);
+  }catch(error){if(request!==explorer.previewRequest||!$('preview-dialog').open)return;const fallback=node('pre',text+(truncated?'\n\n…文件较大，仅预览前 1 MB。':''),'preview-text');root.replaceChildren(fallback);$('preview-editor-status').textContent=language+' · UTF-8 · 只读文本（代码查看器暂未加载）';}
+}
+function toggleTextWrap(){textViewer.wrap=!textViewer.wrap;textViewer.editor?.updateOptions({wordWrap:textViewer.wrap?'on':'off'});$('preview-wrap').setAttribute('aria-pressed',String(textViewer.wrap));}
+
 function previewType(asset){
   if(typeof asset.previewKind==='string')return ['image','audio','video','pdf','text'].includes(asset.previewKind)?asset.previewKind:'none';
   const ext=String(asset.extension||asset.name?.split('.').pop()||'').replace(/^\./,'').toLowerCase(),mime=String(asset.previewMime||asset.mimeType||'').split(';')[0].toLowerCase();
@@ -148,7 +271,7 @@ async function movePreview(delta){const items=previewFiles(),index=items.findInd
 function previewMessage(title,description){const wrap=node('div',undefined,'preview-message');wrap.append(icon('file'),node('h2',title),node('p',description));$('preview-content').replaceChildren(wrap);return wrap;}
 async function showPreview(initial){try{await renderFilePreview(initial);}catch(error){if(explorer.preview?.asset.id===initial.id&&$('preview-dialog').open)previewMessage('无法打开文件',error.message||'请稍后重试。');throw error;}}
 async function renderFilePreview(initial){
-  const request=++explorer.previewRequest;explorer.preview={asset:initial,type:previewType(initial),pendingFetch:false};explorer.zoom=1;closeContext();if(!$('preview-dialog').open)$('preview-dialog').showModal();renderPreviewHeader(initial);previewMessage('正在打开…','');
+  disposeTextViewer();const request=++explorer.previewRequest;explorer.preview={asset:initial,type:previewType(initial),pendingFetch:false};explorer.zoom=1;closeContext();if(!$('preview-dialog').open)$('preview-dialog').showModal();renderPreviewHeader(initial);previewMessage('正在打开…','');
   const asset=initial.scope==='netdisk'?initial:await api(API+'/get',{assetId:initial.id});if(request!==explorer.previewRequest||!$('preview-dialog').open)return;explorer.preview.asset=asset;explorer.preview.type=previewType(asset);renderPreviewHeader(asset);const type=explorer.preview.type;
   if(remoteOnly(asset)){
     const fetching=asset.scope==='netdisk'?cloudExplorer.previewJobs.has(String(asset.fsId)):catalogState.fetching.has(asset.id),wrap=previewMessage(fetching?'正在下载原素材…':'此素材保存在百度网盘',asset.storage?.canFetch?'只下载当前文件，完成后直接预览。分类与向量无需重新生成。':'云端索引尚未关联可下载的原素材。');
@@ -162,7 +285,7 @@ async function renderFilePreview(initial){
   }else if(type==='pdf'){
     const frame=node('iframe');frame.src=asset.scope==='netdisk'?safeUrl('/api/netdisk/jobs/'+encodeURIComponent(asset.jobId)+'/preview','/api/netdisk/jobs/'):safeUrl(API+'/assets/'+encodeURIComponent(asset.id)+'/preview',API+'/assets/');frame.title=asset.name;frame.className='pdf-preview-frame';const fallback=node('a','无法显示时下载原文件','pdf-preview-fallback');fallback.href=safeUrl(asset.contentUrl||(API+'/assets/'+encodeURIComponent(asset.id)+'/content'),asset.scope==='netdisk'?'/api/netdisk/jobs/':API+'/assets/');fallback.download=asset.name||'';root.append(frame,fallback);
   }else if(type==='text'){
-    previewMessage('正在读取文本…','最多显示 1 MB，不执行文件内容。');const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error('此格式不支持安全文本预览，请下载原文件。');const typeHeader=response.headers.get('content-type')||'',raw=await response.text();if(request!==explorer.previewRequest||!$('preview-dialog').open)return;let text=raw;if(typeHeader.includes('application/json')){try{const value=JSON.parse(raw);if(typeof value.text==='string')text=value.text;}catch{/* JSON files themselves remain plain text. */}}const truncated=response.headers.get('X-Preview-Truncated')==='true'||text.length>1048576;const pre=node('pre',text.slice(0,1048576)+(truncated?'\n\n…文件较大，仅预览前 1 MB。':''),'preview-text');root.replaceChildren(pre);
+    previewMessage('正在读取文本…','最多显示 1 MB，不执行文件内容。');const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error('此格式不支持安全文本预览，请下载原文件。');const typeHeader=response.headers.get('content-type')||'',raw=await response.text();if(request!==explorer.previewRequest||!$('preview-dialog').open)return;let text=raw;if(typeHeader.includes('application/json')){try{const value=JSON.parse(raw);if(typeof value.text==='string')text=value.text;}catch{/* JSON files themselves remain plain text. */}}const truncated=response.headers.get('X-Preview-Truncated')==='true'||text.length>1048576;await renderTextViewer(text.slice(0,1048576),asset,request,truncated);
   }else{
     const wrap=previewMessage('此文件使用电脑应用打开',asset.name+' · '+bytes(asset.bytes));if(asset.canOpenNative)wrap.append(button('在本机应用中预览',()=>nativeAction(asset,'open'),'preview-primary'));if(asset.scope==='netdisk'){const save=node('a','下载原文件','preview-primary');save.href=safeUrl(asset.contentUrl,'/api/netdisk/jobs/');save.download=asset.name||'';wrap.append(save,button('查看属性',async()=>{$('preview-dialog').close();cloudProperties(asset);},'preview-secondary'));}else wrap.append(button('查看属性',async()=>{$('preview-dialog').close();await loadDetail(asset.id);},'preview-secondary'));
   }
@@ -201,7 +324,7 @@ async function pollNetdiskPreview(key){
 }
 
 function renderPreviewHeader(asset){
-  $('preview-title').textContent=asset.name||'文件预览';$('preview-meta').textContent=(kindLabels[asset.kind]||asset.extension||'文件')+' · '+bytes(asset.bytes);$('preview-path').textContent=asset.path||asset.name||'';const image=previewType(asset)==='image';for(const id of ['preview-zoom-out','preview-zoom','preview-zoom-in'])$(id).hidden=!image;$('preview-zoom').textContent='适应';$('preview-download').hidden=remoteOnly(asset);if(!remoteOnly(asset))$('preview-download').href=safeUrl(asset.contentUrl||API+'/assets/'+encodeURIComponent(asset.id)+'/content',asset.scope==='netdisk'?'/api/netdisk/jobs/':API+'/assets/');else $('preview-download').removeAttribute('href');updatePreviewNavigation();
+  $('preview-title').textContent=asset.name||'文件预览';$('preview-meta').textContent=(kindLabels[asset.kind]||asset.extension||'文件')+' · '+bytes(asset.bytes);$('preview-path').textContent=asset.path||asset.name||'';const text=previewType(asset)==='text';$('preview-find').hidden=!text;$('preview-wrap').hidden=!text;$('preview-editor-status').hidden=!text;$('preview-key-hint').hidden=text;const image=previewType(asset)==='image';for(const id of ['preview-zoom-out','preview-zoom','preview-zoom-in'])$(id).hidden=!image;$('preview-zoom').textContent='适应';$('preview-download').hidden=remoteOnly(asset);if(!remoteOnly(asset))$('preview-download').href=safeUrl(asset.contentUrl||API+'/assets/'+encodeURIComponent(asset.id)+'/content',asset.scope==='netdisk'?'/api/netdisk/jobs/':API+'/assets/');else $('preview-download').removeAttribute('href');updatePreviewNavigation();
 }
 function updateImageZoom(){const image=$('preview-content').querySelector('.preview-image-stage img');if(!image)return;image.style.transform=explorer.zoom===1?'':'scale('+explorer.zoom+')';image.classList.toggle('zoomed',explorer.zoom>1);$('preview-zoom').textContent=explorer.zoom===1?'适应':Math.round(explorer.zoom*100)+'%';}
 function setImageZoom(value){explorer.zoom=Math.min(8,Math.max(.2,value));updateImageZoom();}
@@ -216,13 +339,13 @@ function closeContext(){const menu=$('file-context-menu');menu.hidden=true;menu.
 function showContext(event,asset,scope){
   closeContext();if(scope==='library'&&!isSelected(asset.id))selectEntry(asset,{});if(scope==='cloud'&&!cloudExplorer.selection.has(asset.path))selectCloud(asset,{});const menu=$('file-context-menu');
   const add=(label,work,shortcut='',disabled=false)=>{const el=button('',()=>{closeContext();return work();},'context-command');el.setAttribute('role','menuitem');el.disabled=disabled;el.append(node('span',label));if(shortcut)el.append(node('kbd',shortcut));menu.append(el);};
-  if(scope==='cloud'){add(asset.isDir?'打开文件夹':'打开',()=>cloudAction(asset),'Enter');add('复制路径',()=>copyPath(asset.path));add('属性',()=>cloudProperties(asset));}
-  else{add(isFolder(asset)?'打开文件夹':'打开',()=>openEntry(asset),'Enter');if(!isFolder(asset)){add('全屏预览',()=>showPreview(asset));add(remoteOnly(asset)?'下载并打开':'下载原文件',()=>remoteOnly(asset)?showPreview(asset):downloadAsset(asset));}add('复制相对路径',()=>copyPath(asset.path||asset.name));if(!isFolder(asset)&&(asset.canOpenNative||asset.canReveal)){menu.append(node('hr'));if(asset.canOpenNative)add('在本机应用中预览',()=>nativeAction(asset,'open'));if(asset.canReveal)add('在系统文件管理器中显示',()=>nativeAction(asset,'reveal'));}menu.append(node('hr'));add('属性',()=>isFolder(asset)?folderProperties(asset):loadDetail(asset.id),'Alt+Enter');}
+  if(scope==='cloud'){add(asset.isDir?'打开文件夹':'打开',()=>cloudAction(asset),'Enter');addFileContextCommands(add,'netdisk',asset);menu.append(node('hr'));add('复制路径',()=>copyPath(asset.path));add('属性',()=>cloudProperties(asset));}
+  else{add(isFolder(asset)?'打开文件夹':'打开',()=>openEntry(asset),'Enter');addFileContextCommands(add,'local',asset);menu.append(node('hr'));if(!isFolder(asset)){add('全屏预览',()=>showPreview(asset));add(remoteOnly(asset)?'下载并打开':'下载原文件',()=>remoteOnly(asset)?showPreview(asset):downloadAsset(asset));}add('复制相对路径',()=>copyPath(asset.path||asset.name));if(!isFolder(asset)&&(asset.canOpenNative||asset.canReveal)){menu.append(node('hr'));if(asset.canOpenNative)add('在本机应用中预览',()=>nativeAction(asset,'open'));if(asset.canReveal)add('在系统文件管理器中显示',()=>nativeAction(asset,'reveal'));}menu.append(node('hr'));add('属性',()=>isFolder(asset)?folderProperties(asset):loadDetail(asset.id),'Alt+Enter');}
   menu.hidden=false;menu.style.left='0';menu.style.top='0';const box=menu.getBoundingClientRect();menu.style.left=Math.max(8,Math.min(event.clientX,innerWidth-box.width-8))+'px';menu.style.top=Math.max(8,Math.min(event.clientY,innerHeight-box.height-8))+'px';menu.querySelector('button:not(:disabled)')?.focus({preventScroll:true});
 }
 function folderProperties(asset){openInspector();current=null;$('detail').hidden=true;$('detail-placeholder').hidden=false;$('detail-placeholder').replaceChildren(node('strong',asset.name),node('p','类型：文件夹'),node('p','路径：'+(asset.path||'工程根目录')),node('p','工程：'+(asset.projectName||asset.name||projectName())),node('p',asset.childCount!==undefined?'包含 '+asset.childCount+' 项':''));}
 function cloudProperties(file){showAction({title:'网盘文件属性',description:(file.isDir?'文件夹':'文件')+' · '+(file.isDir?'':bytes(file.bytes))+' · 修改于 '+time(file.modifiedAt),label:'网盘路径',value:file.path,submit:'关闭',work:async()=>{}});}
-function syncCloudSelection(){if(cloudTable)cloudTable.getRows().forEach(row=>{const f=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',cloudExplorer.selection.has(f.path));el.classList.toggle('file-focused',f.path===cloudExplorer.focusId);el.setAttribute('aria-selected',String(cloudExplorer.selection.has(f.path)));});}
+function syncCloudSelection(){if(cloudTable)cloudTable.getRows().forEach(row=>{const f=row.getData(),el=row.getElement();el.classList.toggle('tabulator-selected',cloudExplorer.selection.has(f.path));el.classList.toggle('file-focused',f.path===cloudExplorer.focusId);el.setAttribute('aria-selected',String(cloudExplorer.selection.has(f.path)));el.classList.toggle('cut-entry',isCutEntry(f,'netdisk'));});updateFileCommands();}
 function selectCloud(file,event={}){
   const additive=event.ctrlKey||event.metaKey;if(event.shiftKey&&cloudExplorer.anchorId){const a=cloudExplorer.entries.findIndex(f=>f.path===cloudExplorer.anchorId),b=cloudExplorer.entries.findIndex(f=>f.path===file.path);if(!additive)cloudExplorer.selection.clear();if(a>=0&&b>=0)cloudExplorer.entries.slice(Math.min(a,b),Math.max(a,b)+1).forEach(f=>cloudExplorer.selection.add(f.path));}
   else{if(!additive)cloudExplorer.selection.clear();if(additive&&cloudExplorer.selection.has(file.path))cloudExplorer.selection.delete(file.path);else cloudExplorer.selection.add(file.path);cloudExplorer.anchorId=file.path;}
@@ -238,13 +361,15 @@ function renderCloudNavigation(){
 }
 function inputTarget(target){return !!target?.closest('input,textarea,select,[contenteditable="true"],[role="textbox"]');}
 function keyboardFiles(event){
-  const editable=inputTarget(event.target);if($('preview-dialog').open){if(event.key==='Escape'){event.preventDefault();$('preview-dialog').close();return;}if(!editable&&!event.target.closest('video,audio')){if(event.key==='ArrowLeft'){event.preventDefault();run(()=>movePreview(-1));}else if(event.key==='ArrowRight'){event.preventDefault();run(()=>movePreview(1));}}return;}
+  const editable=inputTarget(event.target);if($('preview-dialog').open){if(event.target.closest('.monaco-editor,.code-editor-host'))return;if(event.key==='Escape'){event.preventDefault();$('preview-dialog').close();return;}if(!editable&&!event.target.closest('video,audio')){if(event.key==='ArrowLeft'){event.preventDefault();run(()=>movePreview(-1));}else if(event.key==='ArrowRight'){event.preventDefault();run(()=>movePreview(1));}}return;}
   if([...document.querySelectorAll('dialog[open]')].length||editable)return;
   if(!$('file-context-menu').hidden){if(event.key==='Escape'){event.preventDefault();closeContext();return;}if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){event.preventDefault();const controls=[...$('file-context-menu').querySelectorAll('button:not(:disabled)')],index=controls.indexOf(document.activeElement),next=event.key==='Home'?0:event.key==='End'?controls.length-1:(index+(event.key==='ArrowDown'?1:-1)+controls.length)%controls.length;controls[next]?.focus();return;}}
   if(currentTab!=='library'&&currentTab!=='cloud')return;const local=currentTab==='library',root=local?$('asset-content'):$('cloud-table'),active=root.contains(event.target)||event.target===document.body;
   if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='l'&&local){event.preventDefault();editAddress();return;}
   if(event.altKey&&['ArrowLeft','ArrowRight','ArrowUp'].includes(event.key)){event.preventDefault();if(local)run(()=>event.key==='ArrowUp'?navigateLocal(localUpLocation()):navigateHistory(event.key==='ArrowLeft'?-1:1));else run(()=>event.key==='ArrowUp'?navigateCloud(parentCloudPath()):cloudHistory(event.key==='ArrowLeft'?-1:1));return;}
   if(!active)return;const items=local?entries:cloudExplorer.entries,focus=local?explorer.focusId:cloudExplorer.focusId,id=local?'id':'path',focused=items.find(a=>a[id]===focus),selected=local?selectedEntry():items.find(a=>cloudExplorer.selection.has(a.path));
+  const command=event.ctrlKey||event.metaKey;if(command&&['c','x','v'].includes(event.key.toLowerCase())){event.preventDefault();const letter=event.key.toLowerCase();run(()=>letter==='v'?pasteFiles(local?'local':'netdisk'):setFileClipboard(letter==='x'?'move':'copy',local?'local':'netdisk'));return;}
+  if(event.key==='F2'){event.preventDefault();run(()=>renameFile(local?'local':'netdisk'));return;}if(event.key==='Delete'){event.preventDefault();run(()=>deleteFiles(local?'local':'netdisk'));return;}
   if(event.key==='Escape'){event.preventDefault();if(local)clearSelection();else{cloudExplorer.selection.clear();syncCloudSelection();}return;}
   if(event.key==='Enter'){event.preventDefault();const asset=focused||selected;if(asset)run(()=>event.altKey?(local?isFolder(asset)?folderProperties(asset):loadDetail(asset.id):cloudProperties(asset)):local?openEntry(asset):cloudAction(asset));return;}
   if(event.key===' '){event.preventDefault();if(focused){if(local){explorer.anchorId=focused.id;toggleSelection(focused.id,!isSelected(focused.id));}else selectCloud(focused,{ctrlKey:true});}return;}
@@ -475,10 +600,14 @@ $('mkdir').onclick=()=>showAction({title:'新建网盘文件夹',description:'�
 $('upload').onclick=()=>$('files').click();$('files').onchange=()=>{const files=[...$('files').files];$('files').value='';if(files.length)run(()=>uploadFiles(files));};
 $('refresh-jobs').onclick=()=>run(loadJobs);
 $('asset-mcp').textContent=location.origin+'/mcp/assets';$('netdisk-mcp').textContent=location.origin+'/mcp/netdisk';
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)run(pollAi);});window.addEventListener('beforeunload',()=>{clearInterval(jobTimer);clearTimeout(scanTimer);for(const active of cloudExplorer.previewJobs.values())clearTimeout(active.timer);});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)run(pollAi);});window.addEventListener('beforeunload',()=>{clearInterval(jobTimer);clearTimeout(scanTimer);for(const active of cloudExplorer.previewJobs.values())clearTimeout(active.timer);for(const active of fileOps.jobs.values())clearTimeout(active.timer);disposeTextViewer();});
 for(const group of ['embedding','classification'])$('model-tab-'+group).onclick=()=>{for(const other of ['embedding','classification']){$(other+'-section').hidden=other!==group;$('model-tab-'+other).setAttribute('aria-selected',String(other===group));}};
 for(const group of ['embedding','classification'])$(group+'-load-models').onclick=()=>run(disabledWhile($(group+'-load-models'),async()=>{const payload=providerPayload(group);if(payload)await api(API+'/ai/config',{[group]:payload});const result=await api(API+'/ai/models?kind='+group);const models=result.items||result.models||result.data||[];$(group+'-models').replaceChildren();for(const model of models){const id=typeof model==='string'?model:model.id||model.name;if(id)$(group+'-models').append(new Option(id,id));}$(group+'-test-result').textContent=models.length?'已读取 '+models.length+' 个模型，可在模型输入框中选择。':'服务商未返回模型列表，可手动填写。';$(group+'-apiKey').value='';}));
 
+for(const [scope,prefix] of [['local','file'],['netdisk','cloud']]){for(const [action,work] of [['cut',()=>setFileClipboard('move',scope)],['copy',()=>setFileClipboard('copy',scope)],['paste',()=>pasteFiles(scope)],['rename',()=>renameFile(scope)],['delete',()=>deleteFiles(scope)]])$(prefix+'-'+action).onclick=()=>run(work);}
+$('file-operation-execute').onclick=()=>run(executeFilePlan);$('file-operation-dismiss').onclick=()=>{$('file-operation-status').hidden=true;};
+$('asset-content').addEventListener('dragover',event=>fileDragOver(event,'local',null,$('asset-content')));$('asset-content').addEventListener('dragleave',()=>$('asset-content').classList.remove('file-drop-target'));$('asset-content').addEventListener('drop',event=>fileDrop(event,'local',null,$('asset-content')));
+$('cloud-table').addEventListener('dragover',event=>fileDragOver(event,'netdisk',null,$('cloud-table')));$('cloud-table').addEventListener('dragleave',()=>$('cloud-table').classList.remove('file-drop-target'));$('cloud-table').addEventListener('drop',event=>fileDrop(event,'netdisk',null,$('cloud-table')));
 $('open-selected').onclick=()=>run(()=>openEntry(selectedEntry()));
 $('nav-back').onclick=()=>run(()=>navigateHistory(-1));$('nav-forward').onclick=()=>run(()=>navigateHistory(1));$('nav-up').onclick=()=>run(()=>navigateLocal(localUpLocation()));
 $('refresh-directory').onclick=()=>run(loadAssets);$('edit-address').onclick=editAddress;$('address-breadcrumbs').ondblclick=editAddress;
@@ -488,11 +617,12 @@ $('address-input').onblur=()=>{setTimeout(()=>{if(document.activeElement!==$('ad
 $('asset-content').addEventListener('click',event=>{if(!event.target.closest('.tabulator-row,.tabulator-header,.asset-card,button,a,input')){clearSelection();focusFiles('');}});
 $('cloud-table').addEventListener('click',event=>{if(!event.target.closest('.tabulator-row,.tabulator-header')){cloudExplorer.selection.clear();cloudExplorer.focusId='';syncCloudSelection();}});
 $('preview-close').onclick=()=>$('preview-dialog').close();$('preview-previous').onclick=()=>run(()=>movePreview(-1));$('preview-next').onclick=()=>run(()=>movePreview(1));
+$('preview-find').onclick=()=>textViewer.editor?.getAction('actions.find')?.run();$('preview-wrap').onclick=toggleTextWrap;
 $('preview-zoom-in').onclick=()=>setImageZoom(explorer.zoom*1.25);$('preview-zoom-out').onclick=()=>setImageZoom(explorer.zoom/1.25);$('preview-zoom').onclick=()=>setImageZoom(1);
-$('preview-dialog').addEventListener('close',()=>{++explorer.previewRequest;$('preview-content').querySelectorAll('video,audio').forEach(media=>{media.pause();media.removeAttribute('src');media.load();});$('preview-content').replaceChildren();const scope=explorer.preview?.asset.scope;explorer.preview=null;if(scope==='netdisk')$('cloud-table').focus({preventScroll:true});else focusFiles(explorer.focusId);});
+$('preview-dialog').addEventListener('close',()=>{disposeTextViewer();++explorer.previewRequest;$('preview-content').querySelectorAll('video,audio').forEach(media=>{media.pause();media.removeAttribute('src');media.load();});$('preview-content').replaceChildren();const scope=explorer.preview?.asset.scope;explorer.preview=null;if(scope==='netdisk')$('cloud-table').focus({preventScroll:true});else focusFiles(explorer.focusId);});
 document.addEventListener('keydown',keyboardFiles);
 document.addEventListener('pointerdown',event=>{if(!event.target.closest('#file-context-menu'))closeContext();});
-window.addEventListener('blur',closeContext);window.addEventListener('resize',closeContext);
+window.addEventListener('blur',closeContext);window.addEventListener('resize',()=>{closeContext();textViewer.editor?.layout();});
 
 renderCategories();buildTables();selectedInfo();run(async()=>{await loadProjects();pushLocalHistory(localLocation());await loadAssets();});run(loadModelConfig);run(pollAi);run(pollCatalogJobs);jobTimer=setInterval(()=>{if(!document.hidden){run(pollAi);if(currentTab==='history')run(loadJobs);if(catalogState.knownActive.size||$('catalog-dialog').open)run(pollCatalogJobs);}},3500);
 })();

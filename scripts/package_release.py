@@ -9,7 +9,7 @@ import shutil
 import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
-CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'asset_ai.py', 'cloud_archive.py', 'catalog_snapshot.py', 'cloud_catalog.py', 'explorer_browse.py', 'explorer_files.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'ASSET_AI.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
+CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'asset_ai.py', 'cloud_archive.py', 'catalog_snapshot.py', 'cloud_catalog.py', 'explorer_browse.py', 'explorer_files.py', 'file_operations.py', 'file_name_patterns.py', 'local_file_ops.py', 'netdisk_file_ops.py', 'editor_assets.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'ASSET_AI.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
         'minigames.py', 'minigame_formats.py', 'assetripper.py', 'assetripper_cli/__init__.py', 'assetripper_cli/normalize_tuanjie.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
@@ -36,6 +36,11 @@ def prepare(output: Path, skill_source: Path | None = None):
     files['static/resource-library.html'] = SOURCE / 'static/resource-library.html'
     for relative in ('resource-library.css','resource-library.js','vendor/tabulator/tabulator.min.js','vendor/tabulator/tabulator.min.css','vendor/tabulator/LICENSE','vendor/tabulator/PROVENANCE.json'):
         files['static/'+relative] = SOURCE / 'static' / relative
+    sys.path.insert(0, str(SOURCE))
+    from editor_assets import distribution
+    editor_root = SOURCE / 'static/vendor/monaco'
+    for relative in [*distribution(editor_root, verify=True), 'PROVENANCE.json']:
+        files['static/vendor/monaco/'+relative] = editor_root / relative
     files.update({str(path.relative_to(SOURCE)): path for path in (SOURCE / 'tests').glob('test_*.py')})
     sys.path.insert(0, str(SOURCE))
     from web_assets import asset_path
