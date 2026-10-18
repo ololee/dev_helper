@@ -39,11 +39,12 @@ from relay_client import RelayClient, RelayPending, DeliveryUnknown, route_mode
 from web_assets import asset_path
 from minigames import MiniGameService, BASE as MINIGAME_BASE
 from assetripper import AssetRipperAdapter
+from resource_workspace import ResourceWorkspace, ScopedResourceMcp
 
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.8.5"
+VERSION = "2.9.0"
 
 
 def tool_result(value):
@@ -98,6 +99,8 @@ class Desktop:
         self.minigames = MiniGameService(data_dir / 'minigames', self.knowledge,
                                         AssetRipperAdapter(data_dir / 'assetripper'))
         self.relay = RelayClient(self, data_dir)
+        self.resources = ResourceWorkspace(self, data_dir)
+        self.resource_mcps = [ScopedResourceMcp(self.resources, scope) for scope in ('assets', 'netdisk')]
         self.mcp = Server("devhelper-desktop", version=VERSION, instructions=(
             "DevHelper offers local Mac knowledge and Android tools through HTTP. First call "
             "devhelper_list_devices, then read knowledge://bootstrap for enabled local memories and Skills. "
@@ -158,7 +161,7 @@ class Desktop:
         ]
 
     def tool_specs(self):
-        return self.root_specs() + self.knowledge.tool_specs() + self.workflows.tool_specs() + self.notifications.tool_specs() + self.minigames.tool_specs()
+        return self.root_specs() + self.knowledge.tool_specs() + self.workflows.tool_specs() + self.notifications.tool_specs() + self.minigames.tool_specs() + self.resources.tools()
 
     async def phone_notification_request(self, device, method, path, body):
         if device != "android":
@@ -296,6 +299,8 @@ class Desktop:
             return await self.notifications.call_tool(name, arguments)
         if device == "android":
             return await self.phone_rpc("tools/call", dict(name=name, arguments=arguments))
+        if name.startswith(('asset_', 'netdisk_')):
+            return await asyncio.to_thread(self.resources.call, name, arguments)
         if name == "devhelper_relay_config":
             return self.relay.set_config(arguments["settings"]) if "settings" in arguments else self.relay.public_config()
         if name == "devhelper_relay_pair":
@@ -421,10 +426,11 @@ class Desktop:
         self.sync.start()
         await self.workflows.start()
         try:
-            async with self.manager.run():
+            async with self.manager.run(), self.resource_mcps[0].manager.run(), self.resource_mcps[1].manager.run():
                 yield
         finally:
             await asyncio.to_thread(self.minigames.close)
+            await asyncio.to_thread(self.resources.close)
             await self.relay.stop()
             await self.clipboard.stop()
             await self.sync.stop()
@@ -438,6 +444,8 @@ class Desktop:
     async def api(self, request: Request):
         path = request.url.path
         try:
+            if path.startswith(('/api/netdisk/', '/api/resource-library/')):
+                return await self.resources.api(request)
             if path == "/health":
                 return JSONResponse(dict(appId="devhelper-desktop", pid=os.getpid(), port=self.port, status="ok", transport="streamable-http", version=VERSION))
             if path.startswith("/api/relay/"):
@@ -951,11 +959,16 @@ class Desktop:
         async def minigames(request):
             from web_assets import render_minigames_ui
             return HTMLResponse(render_minigames_ui('mac'))
+        async def resource_library(request):
+            return FileResponse(HERE / 'static/resource-library.html', media_type='text/html', headers={'Cache-Control': 'no-store'})
         return Starlette(lifespan=self.lifespan, routes=[
             Route("/", index),
             Route("/notes", notes),
             Route("/spine", spine),
             Route('/minigames', minigames),
+            Route('/resource-library', resource_library),
+            Route('/mcp/assets', self.resource_mcps[0], methods=['GET', 'POST', 'DELETE']),
+            Route('/mcp/netdisk', self.resource_mcps[1], methods=['GET', 'POST', 'DELETE']),
             Route("/spine/{path:path}", self.local_api_spine, methods=["GET", "HEAD", "POST", "DELETE"]),
             Route("/health", self.api),
             Route("/mcp", McpEndpoint(), methods=["GET", "POST", "DELETE"]),

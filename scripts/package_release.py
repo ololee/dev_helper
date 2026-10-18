@@ -9,7 +9,7 @@ import shutil
 import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
-CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'media.py', 'audio.py', 'sync.py', 'spine.py',
+CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
         'minigames.py', 'minigame_formats.py', 'assetripper.py', 'assetripper_cli/__init__.py', 'assetripper_cli/normalize_tuanjie.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
@@ -33,6 +33,7 @@ def prepare(output: Path, skill_source: Path | None = None):
         raise ValueError('Choose an independent output directory outside the development source')
     files = {relative: SOURCE / relative for relative in CORE}
     files['static/index.html'] = SOURCE / 'static/index.html'
+    files['static/resource-library.html'] = SOURCE / 'static/resource-library.html'
     files.update({str(path.relative_to(SOURCE)): path for path in (SOURCE / 'tests').glob('test_*.py')})
     sys.path.insert(0, str(SOURCE))
     from web_assets import asset_path

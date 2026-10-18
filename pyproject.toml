@@ -1,6 +1,6 @@
 [project]
 name = "devhelper-desktop"
-version = "2.8.5"
+version = "2.9.0"
 description = "DevHelper desktop and Android workspace over HTTP MCP"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,7 +22,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["relay", "assetripper_cli"]
-py-modules = ["server", "control", "clipboard", "devices", "knowledge", "resource_batches", "media", "audio", "sync", "private_skills", "web_assets", "workflows", "ai_support", "notifications", "relay_client", "spine", "minigames", "minigame_formats", "assetripper"]
+py-modules = ["server", "control", "clipboard", "devices", "knowledge", "resource_batches", "resource_workspace", "baidu_drive", "asset_library", "media", "audio", "sync", "private_skills", "web_assets", "workflows", "ai_support", "notifications", "relay_client", "spine", "minigames", "minigame_formats", "assetripper"]
 
 [project.scripts]
 devhelper-relay = "relay.server:main"

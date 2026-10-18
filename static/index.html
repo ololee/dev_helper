@@ -41,6 +41,7 @@
     <button id="tab-sync" type="button" role="tab" aria-selected="false" aria-controls="page-sync" data-page="sync" tabindex="-1"><svg aria-hidden="true"><use href="#icon-sync"/></svg>资料同步</button>
     <button id="tab-spine" type="button" role="tab" aria-selected="false" aria-controls="page-spine" data-page="spine" tabindex="-1"><svg aria-hidden="true"><use href="#icon-skill"/></svg>Spine 动画</button>
     <button id="tab-minigames" type="button" role="tab" aria-selected="false" aria-controls="page-minigames" data-page="minigames" tabindex="-1"><svg aria-hidden="true"><use href="#icon-grid"/></svg>小游戏</button>
+    <button id="tab-assets" type="button" role="tab" aria-selected="false" aria-controls="page-assets" data-page="assets" tabindex="-1"><svg aria-hidden="true"><use href="#icon-folder"/></svg>资源库与网盘</button>
     <button id="tab-tts" type="button" role="tab" aria-selected="false" aria-controls="page-tts" data-page="tts" tabindex="-1"><svg aria-hidden="true"><use href="#icon-voice"/></svg>语音</button>
     <button id="tab-clipboard" type="button" role="tab" aria-selected="false" aria-controls="page-clipboard" data-page="clipboard" tabindex="-1"><svg aria-hidden="true"><use href="#icon-clipboard"/></svg>共享剪贴板</button>
     <button id="tab-relay" type="button" role="tab" aria-selected="false" aria-controls="page-relay" data-page="relay" tabindex="-1"><svg aria-hidden="true"><use href="#icon-link"/></svg>中转与传输</button>
@@ -51,7 +52,7 @@
       <div id="relay-error" class="message" role="alert" hidden></div>
       <div class="device-grid">
         <section class="panel"><h2>中转连接</h2><form id="relay-form">
-          <div class="field"><label for="relay-url">服务器 HTTPS 地址</label><input id="relay-url" type="url" placeholder="https://你的服务器地址" autocomplete="off"></div>
+          <div class="field"><label for="relay-url">服务器地址（HTTP / HTTPS）</label><input id="relay-url" type="url" placeholder="http://你的服务器地址:8080" autocomplete="off"></div>
           <div class="field"><label for="relay-code">手机显示的 6 位配对码</label><input id="relay-code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" spellcheck="false" placeholder="例如 123456"></div>
           <p id="relay-code-hint" class="hint">在手机点“添加电脑”生成配对码，输入后点击“请求配对”。配对成功后无需重复输入。</p><p id="relay-pair-status" class="hint" role="status" aria-live="polite">在手机点“添加电脑”，输入短码后发起配对。</p>
           <div class="row"><label><input id="relay-enabled" type="checkbox"> 开启中转</label><label><input id="relay-same-lan" type="checkbox" checked> 同一局域网时优先直连</label></div>
@@ -105,6 +106,7 @@
       <div class="workspace-toolbar"><div class="workspace-heading"><h2 id="spine-title">这台电脑的 Spine 动画</h2><span id="spine-online" class="badge">尚未连接</span><p>导入资源与预览骨架动画</p></div><button id="spine-reload" type="button" class="ghost">重新加载</button></div>
       <div class="frame-shell"><div id="spine-empty" class="frame-empty"><div><h2>设备尚未连接</h2><p>连接当前设备后，可以导入 Spine 资源并预览动画。</p><button id="spine-connect" type="button" class="primary">检查连接</button></div></div><div id="spine-loading" class="frame-loading" role="status" hidden>正在打开 Spine 动画…</div><iframe id="frame-spine-mac" class="app-frame" title="这台电脑的 Spine 动画" allow="fullscreen" allowfullscreen hidden></iframe><iframe id="frame-spine-android" class="app-frame" title="Android 手机的 Spine 动画" allow="fullscreen" allowfullscreen hidden></iframe></div>
     </section>
+    <section id="page-assets" role="tabpanel" aria-labelledby="tab-assets" hidden><div class="frame-shell"><iframe id="frame-assets" class="app-frame" title="资源库与百度网盘"></iframe></div></section>
     <section id="page-tts" role="tabpanel" aria-labelledby="tab-tts" hidden>
       <div class="workspace-toolbar"><div class="workspace-heading"><h2>语音助手</h2><p>在电脑生成语音，手机和电脑都能输入、试听与下载。</p></div><button id="tts-reload" type="button" class="ghost">重新加载</button></div>
       <div class="frame-shell"><div id="tts-loading" class="frame-loading" role="status" hidden>正在打开语音助手…</div><iframe id="frame-tts" class="app-frame" title="语音助手" allow="autoplay"></iframe></div>
@@ -172,9 +174,10 @@
   function openPage(page) {
     state.page=page;
     for(const button of document.querySelectorAll('[data-page]')){const current=button.dataset.page===page;button.setAttribute('aria-selected',String(current));button.tabIndex=current?0:-1;}
-    for(const name of ['home','library','notes','ai','sync','spine','minigames','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
-    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',ai:'AI 助手',sync:'资料同步',spine:'Spine 动画',minigames:'小游戏',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
+    for(const name of ['home','library','notes','ai','sync','spine','minigames','assets','tts','clipboard','relay'])$('page-'+name).hidden=name!==page;
+    document.title='DevHelper · '+({home:'工作台',library:'资料管理',notes:'笔记与录音',ai:'AI 助手',sync:'资料同步',spine:'Spine 动画',minigames:'小游戏',assets:'资源库与网盘',tts:'语音助手',clipboard:'共享剪贴板',relay:'中转与传输'}[page]);
     $('tab-'+page).scrollIntoView({block:'nearest',inline:'nearest'});
+    if(page==='assets'&&!$('frame-assets').getAttribute('src'))$('frame-assets').src='/resource-library';
     if(page==='library')renderLibrary();
     if(page==='notes')renderNotesFrame();if(page==='ai')renderAiFrame();renderSpineFrame();renderMinigamesFrame();
     if(page==='tts'&&!state.loaded.tts){state.loaded.tts=true;$('tts-loading').hidden=false;$('frame-tts').src='/tts/';}

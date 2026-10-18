@@ -59,3 +59,36 @@ class RelayDeployTests(unittest.TestCase):
         self.assertNotIn('restart', deploy.HOOK)
         self.assertIn('User=devhelper-relay', deploy.SERVICE)
         self.assertIn('00,12:00:00', deploy.RENEW_TIMER)
+
+    def test_http_install_keeps_data_and_does_not_request_certificates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / 'identity.pem'
+            key.write_text('SYNTHETIC KEY NEVER UPLOADED')
+            calls = []
+            args = ['deploy_relay.py', '--ssh-host', 'root@192.0.2.1',
+                    '--identity-file', str(key), '--public-ip', '192.0.2.1', '--http-port', '8081']
+            with patch.object(sys, 'argv', args), patch.object(deploy.subprocess, 'run', side_effect=lambda *a, **k: calls.append((a, k))), patch('builtins.print'):
+                deploy.main()
+            self.assertEqual(len(calls), 3)
+            self.assertIn('s.bind', calls[0][0][0][-1])
+            with tarfile.open(fileobj=io.BytesIO(calls[1][1]['input']), mode='r:gz') as archive:
+                service = archive.extractfile('devhelper-relay.service').read().decode()
+            self.assertIn('--port 8081 --data-dir /var/lib/devhelper-relay', service)
+            self.assertNotIn('--ssl-certfile', service)
+            script = calls[-1][1]['input']
+            subprocess.run(['sh', '-n'], input=script, check=True)
+            self.assertIn(b'devhelper-relay.service.before-http', script)
+            self.assertIn(b'disable --now devhelper-relay-renew.timer', script)
+            self.assertNotIn(b'certbot', script)
+            self.assertNotIn(b'rm ', script)
+
+    def test_http_port_conflict_aborts_before_upload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / 'identity.pem'
+            key.write_text('SYNTHETIC KEY NEVER UPLOADED')
+            args = ['deploy_relay.py', '--ssh-host', 'root@192.0.2.1',
+                    '--identity-file', str(key), '--public-ip', '192.0.2.1', '--http-port', '8080']
+            with patch.object(sys, 'argv', args), patch.object(deploy.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'port check')) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    deploy.main()
+            self.assertEqual(run.call_count, 1)

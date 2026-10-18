@@ -5,7 +5,6 @@ import asyncio
 import contextlib
 import contextvars
 import hashlib
-import ipaddress
 import json
 import json as jsonlib
 import os
@@ -14,7 +13,7 @@ import re
 import secrets
 import sqlite3
 import time
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 import uuid
 
 import httpx
@@ -51,16 +50,7 @@ def identifier(value):
 
 
 def server_url(value):
-    root = validate_url(value)
-    parsed = urlsplit(root)
-    if parsed.scheme == 'http' and parsed.hostname != 'localhost':
-        try:
-            address = ipaddress.ip_address(parsed.hostname)
-        except ValueError:
-            raise ValueError('公网中转服务器需要 HTTPS。') from None
-        if not (address.is_private or address.is_loopback):
-            raise ValueError('公网中转服务器需要 HTTPS。')
-    return root
+    return validate_url(value)
 
 
 @contextlib.contextmanager

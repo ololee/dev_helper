@@ -82,7 +82,7 @@ def ssh_args(host, key, port):
             'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10', host]
 
 
-def archive():
+def archive(service=SERVICE):
     data = io.BytesIO()
     def public_metadata(item):
         item.uid = item.gid = item.mtime = 0
@@ -94,7 +94,7 @@ def archive():
             if not path.is_file() or path.is_symlink():
                 raise ValueError('Missing public relay source: ' + relative)
             out.add(path, arcname=relative, recursive=False, filter=public_metadata)
-        extras = {'devhelper-relay.service': SERVICE, 'devhelper-relay-renew.service': RENEW_SERVICE,
+        extras = {'devhelper-relay.service': service, 'devhelper-relay-renew.service': RENEW_SERVICE,
                   'devhelper-relay-renew.timer': RENEW_TIMER, 'renew-certificate.sh': HOOK}
         for name, content in extras.items():
             raw = content.encode()
@@ -102,6 +102,34 @@ def archive():
             item.size, item.mode = len(raw), 0o755 if name.endswith('.sh') else 0o644
             out.addfile(item, io.BytesIO(raw))
     return data.getvalue()
+
+
+def http_service(port):
+    if not 1 <= port <= 65535:
+        raise ValueError('Invalid HTTP port')
+    return SERVICE.replace(
+        '--port 443 --data-dir /var/lib/devhelper-relay --ssl-certfile /etc/devhelper-relay/fullchain.pem --ssl-keyfile /etc/devhelper-relay/privkey.pem',
+        f'--port {port} --data-dir /var/lib/devhelper-relay')
+
+
+HTTP_INSTALL = '''set -eu
+command -v python3.11 >/dev/null || { echo 'Install Python 3.11 using your Linux package manager first'; exit 1; }
+getent passwd devhelper-relay >/dev/null || useradd --system --home-dir /var/lib/devhelper-relay --shell /sbin/nologin devhelper-relay
+if [ ! -x /opt/devhelper-relay/.venv/bin/python ]; then
+  python3.11 -m venv /opt/devhelper-relay/.venv
+fi
+/opt/devhelper-relay/.venv/bin/python -m pip install --disable-pip-version-check -r /opt/devhelper-relay/relay/requirements.txt
+if [ -f /etc/systemd/system/devhelper-relay.service ] && [ ! -f /etc/systemd/system/devhelper-relay.service.before-http ]; then
+  cp -p /etc/systemd/system/devhelper-relay.service /etc/systemd/system/devhelper-relay.service.before-http
+fi
+install -m 0644 /opt/devhelper-relay/devhelper-relay.service /etc/systemd/system/devhelper-relay.service
+systemctl disable --now devhelper-relay-renew.timer 2>/dev/null || true
+systemctl stop devhelper-relay-renew.service 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable devhelper-relay.service
+systemctl restart devhelper-relay.service
+systemctl is-active devhelper-relay.service
+'''
 
 
 def main():
@@ -113,12 +141,24 @@ def main():
     parser.add_argument('--agree-tos', action='store_true', help="Accept Let's Encrypt subscriber terms for certificate issuance")
     parser.add_argument('--staging', action='store_true', help='Test ACME issuance without enabling the HTTPS service')
     parser.add_argument('--update-only', action='store_true', help='Upload source and restart an already configured service')
+    parser.add_argument('--http-port', type=int, help='Run plain HTTP on this port instead of installing certificates')
     args = parser.parse_args()
     public_ip = str(ipaddress.ip_address(args.public_ip))
     ssh = ssh_args(args.ssh_host, args.identity_file, args.ssh_port)
-    if not args.update_only and not args.agree_tos:
+    if args.http_port is not None and (not 1 <= args.http_port <= 65535 or args.staging or args.update_only):
+        parser.error('--http-port requires a valid port and cannot be combined with --staging or --update-only')
+    if args.http_port is None and not args.update_only and not args.agree_tos:
         parser.error('Certificate installation requires --agree-tos')
-    subprocess.run(ssh + ['mkdir -p /opt/devhelper-relay && tar -xzf - -C /opt/devhelper-relay'], input=archive(), check=True)
+    if args.http_port is not None:
+        # Reject an occupied port before uploading or changing an existing service.
+        probe = 'import socket; s=socket.socket(); s.bind(("0.0.0.0", ' + str(args.http_port) + ')); s.close()'
+        subprocess.run(ssh + ['python3.11 -c ' + shlex.quote(probe)], check=True)
+    service = http_service(args.http_port) if args.http_port is not None else SERVICE
+    subprocess.run(ssh + ['mkdir -p /opt/devhelper-relay && tar -xzf - -C /opt/devhelper-relay'], input=archive(service), check=True)
+    if args.http_port is not None:
+        subprocess.run(ssh + ['sh -s'], input=HTTP_INSTALL.encode(), check=True)
+        print(f'HTTP relay installed on port {args.http_port}; verify public /health reachability')
+        return
     if args.update_only:
         subprocess.run(ssh + ['systemctl restart devhelper-relay.service && systemctl is-active devhelper-relay.service'], check=True)
         return

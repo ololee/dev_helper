@@ -74,12 +74,18 @@ class RelayClientTests(unittest.IsolatedAsyncioTestCase):
     def start_phone(self):
         self.pump = asyncio.create_task(self.phone.relay.inbox_loop())
 
-    async def test_redacted_configuration_and_https_validation(self):
+    async def test_redacted_configuration_and_http_https_validation(self):
         public = self.mac.relay.public_config()
         self.assertNotIn('workspaceId', public)
         self.assertNotIn(self.workspace, json.dumps(public))
         self.assertEqual((self.root / 'mac/relay/config.json').stat().st_mode & 0o777, 0o600)
-        with self.assertRaises(ValueError): server_url('http://public.example')
+        self.assertEqual(server_url('http://public.example:8080/'), 'http://public.example:8080')
+        self.assertEqual(server_url('https://public.example:8080'), 'https://public.example:8080')
+        self.assertEqual(server_url('http://8.8.8.8:8081'), 'http://8.8.8.8:8081')
+        for value in ('ftp://public.example', 'http://user:secret@public.example',
+                      'http://public.example?workspace=secret', 'http://public.example/path',
+                      'http://public.example:0', 'http://public.example:65536'):
+            with self.assertRaises(ValueError): server_url(value)
         with self.assertRaises(ValueError): self.mac.relay.set_config({'sameLan': 'yes'})
         response = await self.http.get('http://mac.invalid/api/relay/identity')
         self.assertEqual(response.status_code, 403)
