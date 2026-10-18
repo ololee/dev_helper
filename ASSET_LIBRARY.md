@@ -1,6 +1,6 @@
 # 游戏资源库
 
-资源库只读取用户明确注册的工程目录，或恢复用户选择的百度网盘云索引，不执行工程脚本、不修改源文件。扫描结果、云端索引和原文件分开存储。扫描默认跳过生成目录及符号链接；解析限制、OCR可用性、跳过项都能通过 `asset_capabilities` 查询。
+资源库扫描用户明确注册的工程目录，或恢复用户选择的百度网盘云索引。扫描不执行工程脚本、不修改源文件；文件管理仅按用户明确选择的操作修改。扫描结果、云端索引和原文件分开存储。扫描默认跳过生成目录及符号链接；解析限制、OCR可用性、跳过项都能通过 `asset_capabilities` 查询。
 
 ## 文件浏览与预览
 
@@ -22,9 +22,13 @@ HTTP：
 
 ## 文件管理
 
-本地资源与百度网盘均可对文件、目录进行批量复制、剪切后粘贴、移动、重命名与删除。同一页面内的文件剪贴板保留来源范围，本地与网盘分别操作；跨注册本地工程可复制或移动。文件列表支持 Ctrl／Cmd+C、X、V、F2、Delete；拖入目录默认移动，按 Ctrl／Alt／Cmd 切换为复制。外部系统文件拖入不触发原件修改，上传仍使用上传入口。
+本地资源与百度网盘均可对文件、目录进行批量复制、剪切后粘贴、移动、重命名与删除。文件剪贴板保留来源，可在本地与网盘之间直接粘贴；双栏分别选择位置后可批量拖拽，同一注册本地工程或跨工程也可操作。文件列表支持 Ctrl／Cmd+C、X、V、F2、Delete；拖入目录默认移动，按 Ctrl／Alt／Cmd 切换为复制。跨端操作自动以流式二进制传输，无需单独上传／下载。这里的拖拽针对资源库内部条目，外部系统文件拖入仍走原有上传入口。
 
 多选重命名使用简单模板：`{name}` 是不带最后扩展名的原名称、`{ext}` 是包含点的扩展名（目录为空）、`{index}` 从 1 开始。例如 `贴图_{index}{ext}`。模板只做这三个字面替换，不执行代码；单项也可直接填写完整新名称。批量重命名、移动、删除会展示准确来源、目标与关联 `.meta` 名称，确认后执行。
+
+跨端任务显示当前文件、文件数、已传字节、校验和源文件处理阶段；关闭进度面板不停止任务，刷新后可从任务列表恢复。取消会停止尚未执行的传输和清理；已开始的单次平台提交或清理可能已经完成，须以逐项回执为准。已成功传输的目标保留供查看，不在失败后擅自回删。目标同名冲突直接报告，不覆盖、不自动改名。
+
+跨端剪切要求整批传输和校验成功后才开始处理源文件。本地上传移动额外回读云文件并核对原 SHA256；云端下载核对已知归档 SHA256，没有已知指纹时记录实际下载 SHA256、检查大小并重验云版本。百度的 opaque MD5 字段不作为原始内容 MD5 的保证。源文件在清理前再次检查，变化时停止清理；`moveCommitted:true` 且 `sourceCleanupState:"completed"` 才代表移动完成。失败、未知与部分清理会分别报告，尚未清理的源文件保留。本地源进 DevHelper 回收站，分类与向量另外保留在云资源项目，云端原件删除遵循百度策略。 云资源剪切回本地后，仅对本次已确认删除的云端来源清理旧索引，并先确认目标分类、向量和依赖已完整保留；有其他原件位置、缓存或结果不确定时保留索引并报告原因。
 
 每次操作先生成 20 分钟有效的计划与摘要，开始前重新检查源文件、目录和目标。禁止覆盖、目录套入自身、符号链接与项目根修改。网盘操作限定已授权应用目录，目标完整分页检查冲突；使用官方同步批量文件接口与 `ondup=fail`，不自动重放写请求。网络不确定或部分完成时保留逐项结果，不把排队、未知或服务中断当成已完成。文件操作期间禁止切换网盘账号。
 
@@ -36,12 +40,13 @@ HTTP：
 
 HTTP 使用 `/api/resource-library/file-ops/`：
 
-- `POST plan {scope:"local"|"netdisk",operation:"copy"|"move"|"rename"|"trash",items,destination?,name?}`：只读预览，返回 `planId`、`planDigest` 与准确清单。本地项为 `{projectId,path}`，网盘项为 `{path,fsId?}`，路径不接受任意磁盘目录。目标为同范围的已存在目录。
+- `POST plan {scope:"local"|"netdisk",operation:"copy"|"move"|"rename"|"trash",items,destination?,destinationScope?,name?}`：只读预览，返回 `planId`、`planDigest` 与准确清单。本地项为 `{projectId,path}`，网盘项为 `{path,fsId?}`，路径不接受任意磁盘目录。目标为已存在目录；`destinationScope` 默认同来源，设为另一范围时仅允许 copy／move。跨端本地目标为 `{projectId,path}`，网盘目标为 `{path}`。
 - `POST execute {planId,planDigest}`：排队一次执行，返回 `jobId`。
-- `GET jobs`、`GET jobs/{jobId}`：真实逐项状态。
+- `GET jobs`、`GET jobs/{jobId}`：真实逐项状态和传输进度。
+- `POST jobs/{jobId}/cancel {}`：请求停止跨端任务，返回的状态与逐项结果决定是否已停止。
 - `GET trash`、`POST restore {trashId}`：本地回收列表与恢复任务。
 
-独立 MCP 为 `asset_file_plan/execute/job/jobs/trash/restore` 与 `netdisk_file_plan/execute/job/jobs`，不能跨范围执行另一个 MCP 的计划；执行工具带写入／破坏性提示。MCP 不接受 Base64 文件内容。公开源码不含文件操作记录、回收内容或用户路径。
+独立 MCP 为 `asset_file_plan/execute/job/jobs/trash/restore` 与 `netdisk_file_plan/execute/job/jobs`，不能跨范围执行另一个 MCP 的计划；执行工具带写入／破坏性提示。另有 `asset_transfer_plan/execute/job/jobs/cancel` 和 `netdisk_transfer_plan/execute/job/jobs/cancel`，分别以本地、网盘为来源，目标自动限定另一范围，MCP 不能执行另一来源工具的计划。先读计划和摘要，再执行并轮询进度；不要因超时重放写操作。MCP 不接受 Base64 文件内容。公开源码不含文件操作记录、回收内容或用户路径。
 
 文本全屏预览使用本地 Monaco 编辑器，支持 Lua、C#、JSON、XML、Shader 等语法高亮、行号、折叠、查找、自动换行及行列状态。它是只读代码查看器，文件内容不会被执行或自动保存；资源加载失败时回退到安全纯文本。预览仍最多显示前 1 MiB，截断会明确显示，可下载完整原件。
 

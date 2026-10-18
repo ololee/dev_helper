@@ -122,8 +122,9 @@ def _read_private(path, default):
 
 class _MultipartSlice:
     """Reiterable multipart body: each retry seeks the same bounded file range."""
-    def __init__(self, file, offset, size, check):
+    def __init__(self, file, offset, size, check, progress=None):
         self.file, self.offset, self.size, self.check = file, offset, size, check
+        self.progress = progress
         self.boundary = 'devhelper-' + secrets.token_hex(16)
         self.prefix = ('--' + self.boundary + '\r\nContent-Disposition: form-data; name="file"; filename="part.bin"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
         self.suffix = ('\r\n--' + self.boundary + '--\r\n').encode()
@@ -139,6 +140,8 @@ class _MultipartSlice:
             if not chunk:
                 raise BaiduDriveError('上传源文件已改变，任务停止', 409)
             remaining -= len(chunk)
+            if self.progress is not None:
+                self.progress(self.size - remaining)
             yield chunk
         yield self.suffix
 
@@ -413,7 +416,9 @@ class BaiduDriveService:
             _atomic_private(self.jobs_path, self._jobs)
             return identifier
 
-    def start_upload(self, local_path, remote_path, *, name=None):
+    def start_upload(self, local_path, remote_path, *, name=None, conflict_policy='rename'):
+        if conflict_policy not in ('rename', 'fail'):
+            raise BaiduDriveError('上传冲突策略必须是 rename 或 fail')
         local = Path(local_path)
         if local.is_symlink() or not local.is_file():
             raise BaiduDriveError('请选择存在的普通文件')
@@ -421,8 +426,9 @@ class BaiduDriveService:
             raise BaiduDriveError('该文件超过当前百度接口的 10000 个 4 MiB 分片上限，请先拆分文件')
         with self.lock:
             target = self.remote_path(remote_path, file=True)
-            identifier = self._start('upload', name=name or local.name, remotePath=target, bytes=local.stat().st_size)
-            self.pool.submit(self._run_upload, identifier, local, target)
+            identifier = self._start('upload', name=name or local.name, remotePath=target,
+                                     bytes=local.stat().st_size, conflictPolicy=conflict_policy)
+            self.pool.submit(self._run_upload, identifier, local, target, conflict_policy)
             return self.job(identifier)
 
     def start_download(self, fs_id, local_path, *, expected_md5=None, expected_sha256=None):
@@ -474,7 +480,54 @@ class BaiduDriveService:
         state = 'cancelled' if self._cancellations[identifier].is_set() else 'failed'
         self._update(identifier, state=state, error=message)
 
-    def _run_upload(self, identifier, local, target):
+    def _strict_upload_receipt(self, receipt, target, total, *, rapid=False):
+        """Confirm fail-on-conflict uploads without accepting provider renames.
+
+        The current official create-file contract documents rtype=0 as conflict
+        failure and requires the same value in precreate and create:
+        https://pan.baidu.com/union/doc/基础网盘服务/上传/创建文件/
+        A rapid receipt may omit file metadata; then read back the exact target.
+        No mutation is retried or unknown cloud item removed during confirmation.
+        """
+        if 'path' in receipt and receipt['path'] != target:
+            raise BaiduDriveError('云端上传路径与目标不一致；请检查云端列表，不会将改名结果视为成功', 502)
+        fs_id = receipt.get('fs_id')
+        valid_id = (not isinstance(fs_id, bool) and isinstance(fs_id, (int, str)) and
+                    re.fullmatch(r'[0-9]{1,24}', str(fs_id)) and int(fs_id) > 0)
+        if fs_id is not None and not valid_id:
+            raise BaiduDriveError('云端上传未返回有效文件 ID；请检查云端列表', 502)
+        size = receipt.get('size')
+        valid_size = (not isinstance(size, bool) and isinstance(size, int) and size == total)
+        if size is not None and not valid_size:
+            raise BaiduDriveError('云端上传文件大小与源文件不一致；请检查云端列表', 502)
+        if receipt.get('isdir') not in (None, 0, '0', False):
+            raise BaiduDriveError('云端上传返回了目录，未确认文件', 502)
+        if valid_id and valid_size and receipt.get('path') == target:
+            return {'remotePath': target, 'pathConfirmed': True, 'fsId': str(fs_id)}
+        if not rapid:
+            raise BaiduDriveError('云端创建结果未确认目标路径、文件大小或 ID；请先检查云端列表，避免重复上传', 502)
+        if not valid_id:
+            parent = target.rsplit('/', 1)[0]
+            for start in range(0, 100000, 1000):
+                page = self.list_files(parent, start=start, limit=1000)
+                matches = [item for item in page['items'] if item.get('path') == target]
+                if len(matches) > 1:
+                    raise BaiduDriveError('云端秒传目标返回重复记录，请检查云端列表', 502)
+                if matches:
+                    candidate = matches[0]
+                    # Validate list evidence before issuing any metadata request.
+                    self._strict_upload_receipt(candidate, target, total)
+                    fs_id = candidate['fs_id']
+                    break
+                if not page.get('hasMore'):
+                    break
+            else:
+                raise BaiduDriveError('云端秒传目录超过确认范围，请检查云端列表', 502)
+            if fs_id is None:
+                raise BaiduDriveError('云端秒传未找到准确目标，请检查云端列表', 502)
+        return self._strict_upload_receipt(self.file_info(fs_id), target, total)
+
+    def _run_upload(self, identifier, local, target, conflict_policy='rename'):
         try:
             self._update(identifier, state='running', phase='hashing')
             with local.open('rb') as source:
@@ -494,15 +547,22 @@ class BaiduDriveService:
                     blocks = [hashlib.md5(b'').hexdigest()]
                 self._unchanged(source, before)
                 form = dict(path=target, size=total, isdir=0, autoinit=1,
-                    block_list=json.dumps(blocks, separators=(',', ':')), rtype=1,
+                    block_list=json.dumps(blocks, separators=(',', ':')),
+                    rtype=0 if conflict_policy == 'fail' else 1,
                     local_mtime=int(before.st_mtime))
                 # Precreate/create can rename a conflicting file; do not blindly retry
                 # these mutations after an ambiguous network failure.
                 pre = self._json('POST', FILE_API, query=dict(method='precreate'), form=form, authenticated=True)
                 self._check(identifier)
+                if conflict_policy == 'fail' and 'path' in pre and pre['path'] != target:
+                    raise BaiduDriveError('云端预上传路径与目标不一致；请检查云端列表，不会将改名结果视为成功', 502)
                 if str(pre.get('return_type')) == '2':
+                    receipt = (self._strict_upload_receipt(pre, target, total, rapid=True)
+                               if conflict_policy == 'fail' else
+                               dict(remotePath=pre.get('path', target), pathConfirmed=bool(pre.get('path'))))
+                    self._check(identifier)
                     self._update(identifier, state='completed', phase='completed', progress=100, bytesTransferred=total,
-                        result=dict(remotePath=pre.get('path', target), pathConfirmed=bool(pre.get('path')),
+                        result=dict(**receipt,
                                     bytes=total, md5=whole.hexdigest(), sha256=sha.hexdigest(), rapidUpload=True))
                     return
                 upload_id = pre.get('uploadid')
@@ -516,12 +576,23 @@ class BaiduDriveService:
                 if len(set(missing)) != len(missing):
                     raise BaiduDriveError('百度预上传分片列表重复', 502)
                 transferred = total - sum(max(0, min(BLOCK_SIZE, total - n * BLOCK_SIZE)) for n in missing)
-                self._update(identifier, phase='uploading', progress=0, blockCount=len(blocks))
+                reported = transferred
+                self._update(identifier, phase='uploading', progress=min(99, reported * 99 // max(1, total)),
+                             bytesTransferred=reported, blockCount=len(blocks))
                 for number in missing:
                     self._check(identifier)
                     self._unchanged(source, before)
                     part_size = max(0, min(BLOCK_SIZE, total - number * BLOCK_SIZE))
-                    body = _MultipartSlice(source, number * BLOCK_SIZE, part_size, lambda: self._check(identifier))
+                    base = transferred
+                    def report(consumed):
+                        nonlocal reported
+                        current = min(total, base + consumed)
+                        if current > reported:
+                            reported = current
+                            self._update(identifier, persist=False, bytesTransferred=reported,
+                                         progress=min(99, reported * 99 // max(1, total)))
+                    body = _MultipartSlice(source, number * BLOCK_SIZE, part_size,
+                                           lambda: self._check(identifier), report)
                     reply = self._json('POST', UPLOAD_API, query=dict(method='upload', type='tmpfile', path=target,
                         uploadid=upload_id, partseq=number), authenticated=True, body=body, retry=True,
                         headers={'Content-Type': 'multipart/form-data; boundary=' + body.boundary, 'Content-Length': str(body.length)})
@@ -537,9 +608,12 @@ class BaiduDriveService:
                 result = self._json('POST', FILE_API, query=dict(method='create'), form=form, authenticated=True)
                 if int(result.get('size', -1)) != total or not result.get('fs_id'):
                     raise BaiduDriveError('云端创建结果未确认文件大小或 ID；请先检查云端列表，避免重复上传', 502)
-                committed_path = self.remote_path(result.get('path', target), file=True)
+                receipt = (self._strict_upload_receipt(result, target, total)
+                           if conflict_policy == 'fail' else
+                           dict(remotePath=self.remote_path(result.get('path', target), file=True),
+                                pathConfirmed=bool(result.get('path')), fsId=str(result.get('fs_id', ''))))
                 self._update(identifier, state='completed', phase='completed', progress=100, bytesTransferred=total,
-                    result=dict(remotePath=committed_path, pathConfirmed=bool(result.get('path')), fsId=str(result.get('fs_id', '')), bytes=total,
+                    result=dict(**receipt, bytes=total,
                                 md5=whole.hexdigest(), sha256=sha.hexdigest()))
         except BaseException as error:
             self._failed(identifier, error)

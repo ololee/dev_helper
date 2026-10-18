@@ -45,7 +45,7 @@ from editor_assets import editor_asset
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.12.0"
+VERSION = "2.13.0"
 
 
 def tool_result(value):

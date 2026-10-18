@@ -35,6 +35,9 @@ class Transport:
         self.rapid_upload = False
         self.cached_first_block = False
         self.create_reply = None
+        self.precreate_reply = None
+        self.metadata_reply = None
+        self.list_reply = None
         self.dlink = 'https://d.pcs.baidu.com/fixture?sign=fixture'
 
     def open(self, method, url, *, headers=None, body=None, timeout=90):
@@ -48,14 +51,14 @@ class Transport:
             self.tokens += 1
             data = dict(access_token='private-fixture-token-' + str(self.tokens), refresh_token='private-fixture-refresh', expires_in=3600)
         elif action == 'list':
-            data = dict(errno=0, list=[dict(fs_id=123, path='/apps/Fixture/image.png', server_filename='image.png', size=5, isdir=0, dlink='secret-must-not-return')])
+            data = self.list_reply or dict(errno=0, list=[dict(fs_id=123, path='/apps/Fixture/image.png', server_filename='image.png', size=5, isdir=0, dlink='secret-must-not-return')])
         elif action == 'uinfo':
             data = dict(errno=0, uk=1234567890123, netdisk_name='private-fixture-name')
         elif action == 'precreate':
             form = parse_qs(payload.decode())
             blocks = json.loads(form['block_list'][0])
             missing = list(range(1 if self.cached_first_block else 0, len(blocks)))
-            data = dict(errno=0, uploadid='fixture-upload-id', return_type=2 if self.rapid_upload else 1, block_list=missing)
+            data = self.precreate_reply or dict(errno=0, uploadid='fixture-upload-id', return_type=2 if self.rapid_upload else 1, block_list=missing)
         elif action == 'upload':
             if self.fail_part_once and not self.part_failed:
                 self.part_failed = True
@@ -70,7 +73,7 @@ class Transport:
             form = parse_qs(payload.decode())
             data = self.create_reply or dict(errno=0, fs_id=456, path=form['path'][0], size=int(form['size'][0]))
         elif action == 'filemetas':
-            data = dict(errno=0, list=[dict(fs_id=123, path='/outside/private.bin' if self.outside else '/apps/Fixture/game.bin', size=len(self.content), isdir=0,
+            data = self.metadata_reply or dict(errno=0, list=[dict(fs_id=123, path='/outside/private.bin' if self.outside else '/apps/Fixture/game.bin', size=len(self.content), isdir=0,
                 md5=hashlib.md5(self.content).hexdigest(), dlink=self.dlink)])
         elif urlsplit(url).path == '/fixture':
             if self.fail_download_once and not self.download_failed:
@@ -278,6 +281,103 @@ class BaiduDriveTests(unittest.TestCase):
         commit = next(call for call in self.http.calls if parse_qs(urlsplit(call[1]).query).get('method') == ['create'])
         hashes = json.loads(parse_qs(commit[3].decode())['block_list'][0])
         self.assertEqual(hashes, [hashlib.md5(b'x' * BLOCK_SIZE).hexdigest(), hashlib.md5(b'last').hexdigest()])
+
+    def test_fail_upload_policy_uses_no_overwrite_at_both_mutation_stages(self):
+        self.authorize()
+        source = self.root / 'exclusive.bin'
+        source.write_bytes(b'generated-exclusive-upload')
+        result = self.wait(self.service.start_upload(source, 'exclusive.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'completed', result)
+        self.assertEqual(result['result']['remotePath'], '/apps/Fixture/exclusive.bin')
+        self.assertEqual(result['result']['fsId'], '456')
+        self.assertTrue(result['result']['pathConfirmed'])
+        for _, url, _, body in self.http.calls:
+            if parse_qs(urlsplit(url).query).get('method') in (['precreate'], ['create']):
+                self.assertEqual(parse_qs(body.decode())['rtype'], ['0'])
+        before = len(self.http.calls)
+        with self.assertRaises(BaiduDriveError):
+            self.service.start_upload(source, 'exclusive.bin', conflict_policy='overwrite')
+        self.assertEqual(len(self.http.calls), before)
+
+    def test_fail_upload_late_conflict_and_renamed_receipts_are_never_success(self):
+        self.authorize()
+        source = self.root / 'exclusive.bin'
+        source.write_bytes(b'generated-exclusive-upload')
+        self.http.create_reply = dict(errno=-8)
+        result = self.wait(self.service.start_upload(source, 'exclusive.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'failed', result)
+        self.assertIn('-8', result['error'])
+        for receipt in (
+            dict(errno=0, fs_id=456, size=source.stat().st_size, path='/apps/Fixture/exclusive(1).bin'),
+            dict(errno=0, fs_id=456, size=source.stat().st_size),
+            dict(errno=0, fs_id=True, size=source.stat().st_size, path='/apps/Fixture/exclusive.bin'),
+            dict(errno=0, fs_id='0', size=source.stat().st_size, path='/apps/Fixture/exclusive.bin'),
+        ):
+            self.http.create_reply = receipt
+            result = self.wait(self.service.start_upload(source, 'exclusive.bin', conflict_policy='fail'))
+            self.assertEqual(result['state'], 'failed', result)
+        self.assertFalse(any(parse_qs(urlsplit(call[1]).query).get('method') == ['filemanager'] for call in self.http.calls))
+        self.assertEqual(source.read_bytes(), b'generated-exclusive-upload')
+
+    def test_fail_rapid_upload_requires_exact_target_id_and_size(self):
+        self.authorize()
+        source = self.root / 'rapid.bin'
+        source.write_bytes(b'generated-rapid-upload')
+        target = '/apps/Fixture/rapid.bin'
+        self.http.precreate_reply = dict(errno=0, return_type=2, path=target,
+                                        fs_id=456, size=source.stat().st_size)
+        result = self.wait(self.service.start_upload(source, 'rapid.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'completed', result)
+        self.assertEqual(result['result']['fsId'], '456')
+        self.assertTrue(result['result']['rapidUpload'])
+        for change in ({'path': '/apps/Fixture/rapid(1).bin'}, {'size': 999}, {'fs_id': False}):
+            self.http.precreate_reply = dict(errno=0, return_type=2, path=target,
+                                            fs_id=456, size=source.stat().st_size)
+            self.http.precreate_reply.update(change)
+            result = self.wait(self.service.start_upload(source, 'rapid.bin', conflict_policy='fail'))
+            self.assertEqual(result['state'], 'failed', result)
+        self.assertFalse(self.http.parts)
+        self.assertFalse(any(parse_qs(urlsplit(call[1]).query).get('method') == ['create'] for call in self.http.calls))
+
+    def test_fail_rapid_minimal_receipt_reads_back_exact_scoped_file(self):
+        self.authorize()
+        source = self.root / 'rapid.bin'
+        source.write_bytes(b'generated-rapid-upload')
+        target = '/apps/Fixture/rapid.bin'
+        self.http.precreate_reply = dict(errno=0, return_type=2)
+        item = dict(fs_id=456, size=source.stat().st_size, path=target, isdir=0)
+        self.http.list_reply = dict(errno=0, list=[item], has_more=False)
+        self.http.metadata_reply = dict(errno=0, list=[item])
+        result = self.wait(self.service.start_upload(source, 'rapid.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'completed', result)
+        self.assertTrue(result['result']['pathConfirmed'])
+        self.assertEqual(result['result']['fsId'], '456')
+        self.http.metadata_reply = dict(errno=0, list=[dict(item, path='/apps/Fixture/elsewhere.bin')])
+        result = self.wait(self.service.start_upload(source, 'rapid.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'failed', result)
+
+    def test_upload_progress_updates_within_blocks_and_never_regresses_on_retry(self):
+        self.authorize()
+        source = self.root / 'progress.bin'
+        source.write_bytes(b'p' * (BLOCK_SIZE + 5 * 65536))
+        self.http.fail_part_once = True
+        events = []
+        original = self.service._update
+        def observe(identifier, *, persist=True, **fields):
+            if 'bytesTransferred' in fields:
+                events.append((fields['bytesTransferred'], persist))
+            return original(identifier, persist=persist, **fields)
+        self.service._update = observe
+        result = self.wait(self.service.start_upload(source, 'progress.bin', conflict_policy='fail'))
+        self.assertEqual(result['state'], 'completed', result)
+        counts = [count for count, _ in events]
+        self.assertEqual(counts, sorted(counts))
+        self.assertEqual(counts[-1], source.stat().st_size)
+        incremental = [count for count, persist in events if not persist]
+        self.assertGreater(len(incremental), 10)
+        self.assertIn(65536, incremental)
+        self.assertIn(BLOCK_SIZE + 65536, incremental)
+        self.assertTrue(all(count <= source.stat().st_size for count in counts))
 
     def test_create_missing_confirmation_is_not_fake_success(self):
         self.authorize()

@@ -195,6 +195,67 @@ class FileOperationsServiceTests(unittest.TestCase):
         self.assertEqual(job['error'], 'Generated safe failure')
         self.assertNotIn('not public', json.dumps(job))
 
+    def cross_plan(self, operation='copy', source='local'):
+        cross=Mock()
+        cross.plan.return_value={'items':[{'name':'generated.bin','source':{'projectId':'generated','path':'generated.bin'},
+                                          'destination':'target/generated.bin'}], 'fileCount':1,'bytes':120,'_private':'hidden'}
+        cross.execute.return_value={'state':'completed','items':[{'state':'completed'}],
+                                    'sourceCleanupState':'retained','moveCommitted':False}
+        self.service._transfer=cross
+        plan=self.service.plan(source,operation,[{'path':'generated.bin'}],destination={'path':'target'},
+                               destination_scope='netdisk' if source=='local' else 'local')
+        return plan,cross
+
+    def test_cross_scope_plans_dispatch_once_and_isolate_source_catalog(self):
+        plan,cross=self.cross_plan()
+        self.assertEqual((plan['scope'],plan['sourceScope'],plan['destinationScope']),('transfer','local','netdisk'))
+        self.assertNotIn('_private',json.dumps(plan))
+        with self.assertRaises(AssetLibraryError):self.service.execute(plan['planId'],plan['planDigest'],'local')
+        with self.assertRaises(AssetLibraryError):self.service.execute(plan['planId'],plan['planDigest'],'transfer','netdisk')
+        job=self.service.execute(plan['planId'],plan['planDigest'],'transfer','local')
+        again=self.service.execute(plan['planId'],plan['planDigest'],'transfer','local')
+        self.assertEqual(job['jobId'],again['jobId'])
+        final=self.wait_job(job['jobId']);self.assertEqual(final['state'],'completed')
+        self.assertEqual(cross.execute.call_count,1)
+        self.assertEqual(self.service.list_transfer_jobs('local')['items'][0]['jobId'],job['jobId'])
+        self.assertEqual(self.service.list_transfer_jobs('netdisk')['items'],[])
+        with self.assertRaises(AssetLibraryError):self.service.job(job['jobId'],'transfer','netdisk')
+
+    def test_cross_transfer_reports_persisted_progress_and_cooperative_cancel(self):
+        plan,cross=self.cross_plan()
+        entered=threading.Event()
+        def run(plan,progress,cancelled):
+            progress({'phase':'uploading','bytesTransferred':64,'totalBytes':120,'fileCount':1,
+                      'completedFiles':0,'currentFile':'generated.bin','_token':'hidden','downloadUrl':'secret-link'})
+            entered.set()
+            deadline=time.monotonic()+3
+            while not cancelled() and time.monotonic()<deadline:time.sleep(.005)
+            self.assertTrue(cancelled())
+            return {'state':'cancelled','items':[{'state':'cancelled','sourcePreserved':True}],
+                    'sourceCleanupState':'retained','moveCommitted':False}
+        cross.execute.side_effect=run
+        job=self.execute(plan);self.assertTrue(entered.wait(2))
+        current=self.service.job(job['jobId'])
+        self.assertEqual(current['progress']['bytesTransferred'],64)
+        self.assertTrue(self.service.netdisk_active())
+        self.assertNotIn('secret-link',self.service.path.read_text())
+        self.service.cancel(job['jobId'],'local')
+        final=self.wait_job(job['jobId'])
+        self.assertEqual(final['state'],'cancelled');self.assertTrue(final['cancelRequested'])
+        self.assertEqual(final['result']['sourceCleanupState'],'retained')
+
+    def test_cross_move_requires_explicit_verified_source_cleanup_to_complete(self):
+        for cleanup,committed,expected in [('retained',False,'completed-with-errors'),
+                                           ('failed',False,'completed-with-errors'),
+                                           ('completed',False,'completed-with-errors'),
+                                           ('completed',True,'completed')]:
+            with self.subTest(cleanup=cleanup,committed=committed):
+                plan,cross=self.cross_plan('move')
+                cross.execute.return_value={'state':'completed','items':[{'state':'completed'}],
+                                             'sourceCleanupState':cleanup,'moveCommitted':committed}
+                job=self.wait_job(self.execute(plan)['jobId'])
+                self.assertEqual(job['state'],expected)
+
 
 if __name__ == '__main__':
     unittest.main()
