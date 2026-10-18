@@ -24,6 +24,7 @@ class OfflineDrive:
     """Records exact generated binary bytes; never makes a cloud connection."""
     def __init__(self):
         self.uploads = []
+        self.directories = []
         self._jobs = {}
         self.gate = threading.Event()
         self.gate.set()
@@ -31,13 +32,18 @@ class OfflineDrive:
         self.raise_number = None
         self.fail_manifest = False
         self.rename = False
+        self.unconfirmed_number = None
 
     def _token(self): return 'offline-fixture-token'
     def remote_path(self, path, *, file=False):
         if path.startswith('/apps/Fixture/') or path == '/apps/Fixture': return path.rstrip('/')
         if path.startswith('/') or '..' in path.split('/'): raise BaiduDriveError('Invalid fixture remote path')
         return '/apps/Fixture/' + path
-    def mkdir(self, path): return {'path': path, 'isdir': 1}
+    def mkdir(self, path):
+        self.directories.append(path)
+        return {'path': path, 'isdir': 1}
+    def list_files(self, path='', start=0, limit=100):
+        return {'path': path, 'items': [], 'directoryExists': True}
     def start_upload(self, path, remote_path, *, name=None):
         number = len(self.uploads) + 1
         if number == self.raise_number: raise BaiduDriveError('Offline fixture upload was rejected', 409)
@@ -49,6 +55,8 @@ class OfflineDrive:
             _failed=failed, result={'remotePath': remote_path + ('.renamed' if self.rename else ''),
                 'fsId': str(number), 'bytes': len(content), 'md5': hashlib.md5(content).hexdigest(),
                 'sha256': hashlib.sha256(content).hexdigest()})
+        if number == self.unconfirmed_number:
+            self._jobs[identifier]['result']['pathConfirmed'] = False
         return self.job(identifier)
     def job(self, identifier):
         item = dict(self._jobs[identifier])
@@ -308,6 +316,109 @@ class ResourceWorkspaceHttpTests(unittest.TestCase):
         finally: drive.gate.set()
         result = self.wait_backup(result['jobId'])
         self.assertEqual(result['state'], 'completed', result)
+
+    def classified_plan(self, ids):
+        response=self.client.post('/api/resource-library/backup-plan',json={'assetIds':ids,'remoteDirectory':'organized-library','layout':'classified'})
+        self.assertEqual(response.status_code,200,response.text)
+        return response.json()
+
+    def start_classified(self, ids, plan):
+        return self.client.post('/api/resource-library/backup',json={'assetIds':ids,'remoteDirectory':'organized-library','layout':'classified','planDigest':plan['planDigest']})
+
+    def test_archive_preview_is_local_read_only_and_mcp_returns_same_digest(self):
+        items=self.fixture_project();drive=self.mock_drive();ids=[items['texture.png']['id'],items['opaque.bin']['id']]
+        with patch.object(drive,'_token',side_effect=AssertionError('Preview accessed credentials')),patch.object(self.desktop.resources,'stage_asset',side_effect=AssertionError('Preview staged bytes')):
+            plan=self.classified_plan(ids)
+            rpc=self.rpc('assets','tools/call',{'name':'asset_backup_plan','arguments':{'assetIds':ids,'remoteDirectory':'organized-library'}})
+        self.assertEqual(rpc['structuredContent']['planDigest'],plan['planDigest'])
+        self.assertFalse(plan['cloudWrites']);self.assertFalse(plan['inferenceUsed'])
+        self.assertEqual(plan['summary']['fileCount'],2)
+        self.assertEqual(len(plan['planDigest']),64)
+        self.assertEqual(drive.directories,[]);self.assertEqual(drive.uploads,[])
+        self.assertNotIn(str(self.source),json.dumps(plan))
+
+    def test_classified_upload_requires_preview_and_rejects_changed_classification_before_token(self):
+        items=self.fixture_project();drive=self.mock_drive();ids=[items['texture.png']['id']]
+        plan=self.classified_plan(ids)
+        self.desktop.resources.library.save_annotation(ids[0],{'source':'manual','categories':['gui'],'label':'Generated interface'})
+        with patch.object(drive,'_token',side_effect=AssertionError('Stale plan accessed credentials')):
+            missing=self.client.post('/api/resource-library/backup',json={'assetIds':ids,'remoteDirectory':'organized-library','layout':'classified'})
+            self.assertEqual(missing.status_code,409,missing.text)
+            stale=self.start_classified(ids,plan)
+            self.assertEqual(stale.status_code,409,stale.text)
+        self.assertEqual(drive.uploads,[]);self.assertEqual(drive.directories,[])
+
+    def test_classified_archive_preserves_binary_and_portable_classification_catalog(self):
+        items=self.fixture_project();drive=self.mock_drive();ids=[items['texture.png']['id'],items['opaque.bin']['id']]
+        self.desktop.resources.library.save_annotation(ids[0],{'source':'manual','categories':['gui','vfx'],'purpose':'Generated fixture for cloud archive tests','evidence':'Chosen in generated fixture'})
+        plan=self.classified_plan(ids)
+        response=self.start_classified(ids,plan);self.assertEqual(response.status_code,200,response.text)
+        result=self.wait_backup(response.json()['jobId'])
+        self.assertEqual(result['state'],'completed',result)
+        self.assertEqual(result['layout'],'classified');self.assertEqual(result['planDigest'],plan['planDigest'])
+        for index,entry in enumerate(plan['items']):
+            upload=drive.uploads[index]
+            self.assertEqual(upload['path'],plan['remoteDirectory']+'/'+entry['archiveRelativePath'])
+            self.assertEqual(hashlib.sha256(upload['content']).hexdigest(),entry['sha256'])
+            self.assertNotIn(result['jobId'],upload['path'])
+        self.assertEqual(plan['items'][0]['classificationSource'],'manual')
+        self.assertEqual(plan['items'][0]['primaryCategory'],'gui')
+        self.assertIn('/gui-',drive.uploads[0]['path'])
+        catalog=drive.uploads[-1]
+        self.assertEqual(catalog['path'],plan['remoteDirectory']+'/_catalog/'+result['jobId']+'/manifest.json')
+        manifest=json.loads(catalog['content'])
+        self.assertEqual(manifest['formatVersion'],2)
+        self.assertEqual(manifest['planDigest'],plan['planDigest'])
+        self.assertEqual(manifest['items'][0]['metadata']['annotations'][0]['categories'],['gui','vfx'])
+        self.assertNotIn(str(self.source),catalog['content'].decode())
+        self.assertTrue(all(i['remotePath']==i['result']['remotePath'] for i in manifest['items']))
+        self.assert_staging_empty()
+
+    def test_queued_classified_archive_stops_before_upload_if_annotation_changed(self):
+        items=self.fixture_project();drive=self.mock_drive();ids=[items['texture.png']['id']]
+        plan=self.classified_plan(ids);pending=[]
+        with patch.object(self.desktop.resources.pool,'submit',side_effect=lambda fn,*args:pending.append((fn,args))):
+            response=self.start_classified(ids,plan)
+        self.assertEqual(response.status_code,200,response.text)
+        self.desktop.resources.library.save_annotation(ids[0],{'source':'manual','categories':['gui']})
+        fn,args=pending.pop();fn(*args)
+        result=self.wait_backup(response.json()['jobId'])
+        self.assertEqual(result['state'],'failed',result)
+        self.assertEqual(result['completedCount'],0)
+        self.assertEqual(drive.uploads,[]);self.assertEqual(drive.directories,[])
+        self.assert_staging_empty()
+
+    def test_existing_archive_directory_is_checked_and_never_renamed(self):
+        self.mock_drive();workspace=self.desktop.resources;created=set();path='/apps/Fixture/organized-library'
+        duplicate=BaiduDriveError('Existing name',409,provider_code='-8')
+        with patch.object(self.drive_stub,'mkdir',side_effect=duplicate),patch.object(self.drive_stub,'list_files',return_value={'path':path,'directoryExists':True}) as listing:
+            workspace._ensure_archive_directory(path,created)
+        self.assertEqual(created,{path});listing.assert_called_once_with(path,start=0,limit=1)
+        with patch.object(self.drive_stub,'mkdir',return_value={'path':path+'(1)','isdir':1}):
+            with self.assertRaises(BaiduDriveError):workspace._ensure_archive_directory(path,set())
+        with patch.object(self.drive_stub,'mkdir',side_effect=duplicate),patch.object(self.drive_stub,'list_files',side_effect=BaiduDriveError('Not a directory',409)):
+            with self.assertRaises(BaiduDriveError):workspace._ensure_archive_directory(path,set())
+
+    def test_classified_archive_does_not_complete_when_rapid_upload_path_is_unknown(self):
+        items=self.fixture_project();drive=self.mock_drive();ids=[items['texture.png']['id']]
+        plan=self.classified_plan(ids)
+        for unconfirmed_number in (1,2):
+            with self.subTest(unconfirmed=unconfirmed_number):
+                drive.uploads.clear();drive.unconfirmed_number=unconfirmed_number
+                response=self.start_classified(ids,plan);self.assertEqual(response.status_code,200,response.text)
+                result=self.wait_backup(response.json()['jobId'])
+                self.assertEqual(result['state'],'failed',result)
+                self.assertNotIn('manifest',result)
+                if unconfirmed_number==1:
+                    self.assertEqual(result['completedCount'],0)
+                    self.assertTrue(result['items'][0]['cloudUploadCompleted'])
+                    self.assertFalse(result['items'][0]['remotePathConfirmed'])
+                    self.assertEqual(len(drive.uploads),1)
+                else:
+                    self.assertEqual(result['completedCount'],1)
+                    self.assertEqual(result['manifestState'],'failed')
+                    self.assertFalse(result['unconfirmedManifestReceipt']['pathConfirmed'])
+                self.assert_staging_empty()
 
     def test_backup_completion_ledger_and_manifest_match_exact_uploaded_bytes(self):
         items = self.fixture_project(); drive = self.mock_drive(); drive.rename = True

@@ -255,6 +255,18 @@ class BaiduDriveTests(unittest.TestCase):
         self.assertFalse(result['result']['pathConfirmed'])
         self.assertFalse(self.http.parts)
 
+    def test_normal_upload_receipt_distinguishes_requested_and_confirmed_path(self):
+        self.authorize()
+        source=self.root/'path-confirmation.bin';source.write_bytes(b'generated-path-fixture')
+        result=self.wait(self.service.start_upload(source,'path-confirmation.bin'))
+        self.assertEqual(result['state'],'completed',result)
+        self.assertTrue(result['result']['pathConfirmed'])
+        self.http.create_reply=dict(errno=0,fs_id=456,size=source.stat().st_size)
+        result=self.wait(self.service.start_upload(source,'path-unconfirmed.bin'))
+        self.assertEqual(result['state'],'completed',result)
+        self.assertFalse(result['result']['pathConfirmed'])
+        self.assertEqual(result['result']['remotePath'],'/apps/Fixture/path-unconfirmed.bin')
+
     def test_cached_blocks_are_retained_in_complete_file_block_list(self):
         self.authorize()
         self.http.cached_first_block = True

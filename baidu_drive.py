@@ -527,7 +527,7 @@ class BaiduDriveService:
                     raise BaiduDriveError('云端创建结果未确认文件大小或 ID；请先检查云端列表，避免重复上传', 502)
                 committed_path = self.remote_path(result.get('path', target), file=True)
                 self._update(identifier, state='completed', phase='completed', progress=100, bytesTransferred=total,
-                    result=dict(remotePath=committed_path, fsId=str(result.get('fs_id', '')), bytes=total,
+                    result=dict(remotePath=committed_path, pathConfirmed=bool(result.get('path')), fsId=str(result.get('fs_id', '')), bytes=total,
                                 md5=whole.hexdigest(), sha256=sha.hexdigest()))
         except BaseException as error:
             self._failed(identifier, error)
