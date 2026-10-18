@@ -159,4 +159,69 @@ class NativeFileTransferPresentationTest {
         meta.addProperty("sourceCleanupState", "unknown"); meta.add("sourcePreserved", com.google.gson.JsonNull.INSTANCE)
         assertEquals(listOf(original), NativeFileTransferPresentation.remainingCutItems(partialMove(primary, meta), "netdisk", listOf(original)))
     }
+
+    @Test fun mutationCompletionRequiresEveryExplicitReceiptAndUnknownDeleteIsNeverSuccess() {
+        val item = JsonObject().apply { addProperty("state", "completed"); addProperty("deleted", true) }
+        val result = JsonObject().apply { add("items", com.google.gson.JsonArray().apply { add(item) }) }
+        val value = job("completed", "trash", result)
+        assertTrue(NativeFileTransferPresentation.mutationFinished(value))
+        assertEquals("删除完成", NativeFileTransferPresentation.stage(value))
+        item.add("deleted", com.google.gson.JsonNull.INSTANCE)
+        item.addProperty("state", "unknown")
+        assertFalse(NativeFileTransferPresentation.mutationFinished(value))
+        assertEquals("删除状态待确认", NativeFileTransferPresentation.itemStatus(value, item))
+        assertFalse(NativeFileTransferPresentation.stage(value) == "删除完成")
+        assertEquals(0f, NativeFileTransferPresentation.progress(value))
+        item.addProperty("deleted", false); item.addProperty("state", "failed")
+        assertFalse(NativeFileTransferPresentation.mutationFinished(value))
+        assertTrue(NativeFileTransferPresentation.itemStatus(value, item).contains("未能"))
+    }
+
+    @Test fun renameReceiptsHaveTheirOwnStageAndRealTargetName() {
+        val item = JsonObject().apply { addProperty("state", "completed"); addProperty("renamed", true); addProperty("targetName", "hero_1.png") }
+        val result = JsonObject().apply { add("items", com.google.gson.JsonArray().apply { add(item) }) }
+        val value = job("completed", "rename", result).apply { addProperty("sourceScope", "local") }
+        assertEquals("手机文件 · 重命名", NativeFileTransferPresentation.jobTitle(value))
+        assertEquals("重命名完成", NativeFileTransferPresentation.stage(value))
+        assertEquals("已重命名为 hero_1.png", NativeFileTransferPresentation.itemStatus(value, item))
+        item.add("renamed", com.google.gson.JsonNull.INSTANCE)
+        assertFalse(NativeFileTransferPresentation.mutationFinished(value))
+        assertEquals("重命名结果待确认", NativeFileTransferPresentation.itemStatus(value, item))
+        item.addProperty("renamed", false); item.addProperty("unchanged", true)
+        assertTrue(NativeFileTransferPresentation.mutationFinished(value))
+        assertEquals("名称未变化", NativeFileTransferPresentation.itemStatus(value, item))
+        assertEquals(1f, NativeFileTransferPresentation.progress(value))
+        item.addProperty("renamed", true); value.addProperty("state", "completed-with-errors")
+        assertFalse(NativeFileTransferPresentation.mutationFinished(value))
+    }
+
+    @Test fun cancelledMutationDoesNotShowTransferOrFalseCompletion() {
+        val value = job("cancelled", "trash").apply { addProperty("sourceScope", "netdisk") }
+        assertEquals("百度网盘 · 删除", NativeFileTransferPresentation.jobTitle(value))
+        assertFalse(NativeFileTransferPresentation.mutationFinished(value))
+        assertTrue(NativeFileTransferPresentation.stage(value).contains("取消"))
+        assertFalse(NativeFileTransferPresentation.stage(value).contains("完成"))
+    }
+
+    @Test fun previewCacheWaitsUntilPlayersAndDecodersReleaseAndClosesExactlyOnce() {
+        val disposed = mutableListOf<String>()
+        val lease = NativeFilePreviewLease { disposed.add(it) }
+        lease.accept("owned-preview")
+        val player = lease.acquire(); val decoder = lease.acquire()
+        lease.close(); assertTrue(lease.cancelled.get()); assertTrue(disposed.isEmpty())
+        player.close(); player.close(); assertTrue(disposed.isEmpty())
+        decoder.close(); assertEquals(listOf("owned-preview"), disposed)
+        lease.close(); decoder.close(); assertEquals(listOf("owned-preview"), disposed)
+    }
+
+    @Test fun cancelledPreviewClosesAnIoResultThatArrivesAfterTheWindowWasDisposed() {
+        val disposed = mutableListOf<String>()
+        val lease = NativeFilePreviewLease { disposed.add(it) }
+        lease.close(); lease.accept("late-preview")
+        assertEquals(listOf("late-preview"), disposed)
+        try { lease.acquire(); fail("A cancelled preview cannot acquire a new player") } catch (_: IllegalStateException) { }
+        val second = NativeFilePreviewLease { disposed.add(it) }
+        second.accept("next-preview"); second.close()
+        assertEquals(listOf("late-preview", "next-preview"), disposed)
+    }
 }

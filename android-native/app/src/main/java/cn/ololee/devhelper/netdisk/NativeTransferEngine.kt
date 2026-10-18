@@ -19,6 +19,9 @@ interface NativeTransferStore {
     fun read(node: TransferNode, destination: File, progress: (Long) -> Unit, cancelled: () -> Boolean)
     fun createDirectory(parent: TransferNode, name: String): TransferNode
     fun write(parent: TransferNode, name: String, source: File, progress: (Long) -> Unit, cancelled: () -> Boolean): TransferNode
+    fun rename(node: TransferNode, newName: String): TransferNode = throw UnsupportedOperationException("当前存储不支持重命名")
+    fun rename(node: TransferNode, newName: String, inventory: List<NativeTransferEngine.Entry>,
+               progress: (JsonObject) -> Unit, cancelled: () -> Boolean): TransferNode = rename(node,newName)
     fun remove(node: TransferNode): Boolean
 }
 
@@ -86,7 +89,24 @@ class NativeTransferEngine(private val staging: File) {
         return Plan(UUID.randomUUID().toString(),UUID.randomUUID().toString()+UUID.randomUUID().toString(),operation,
             source,target,destination,sources,System.currentTimeMillis()+20*60*1000,account)
     }
-    fun execute(plan: Plan, progress: (JsonObject)->Unit, cancelled: ()->Boolean): JsonObject {
+    /** Internal compatibility path only. Public transfer plans still require two different stores. */
+    internal fun renameByCopy(store:NativeTransferStore,node:TransferNode,newName:String,inventory:List<Entry>,
+                              progress:(JsonObject)->Unit,cancelled:()->Boolean):JsonObject {
+        require(store.scope=="local"&&!store.isRoot(node)) {"复制重命名仅支持受控手机项目"}
+        safeName(newName);require(newName!=node.name&&inventory.isNotEmpty()&&inventory.first().node==node&&inventory.first().relative.isEmpty()) {"重命名清单无效"}
+        require(inventory.map {it.node.ref}.distinct().size==inventory.size&&inventory.size<=100000&&inventory.all {it.relative.size<=128}) {"重命名清单过大或重叠"}
+        val parent=store.stat(node.parent?:error("无法确认重命名父目录"))?:error("重命名父目录不存在")
+        check(parent.directory&&store.child(parent,newName)==null) {"目标已存在同名项目，未覆盖"}
+        val renamedSource=Source(node.copy(name=newName),inventory)
+        val plan=Plan(UUID.randomUUID().toString(),UUID.randomUUID().toString(),"move",store,store,parent,
+            listOf(renamedSource),System.currentTimeMillis()+20*60*1000,"")
+        val receipt=execute(plan,progress,cancelled,true)
+        val destination=runCatching {store.child(parent,newName)}
+        receipt.addProperty("destinationState",if(destination.isFailure)"unknown" else if(destination.getOrNull()==null)"absent" else "present")
+        destination.getOrNull()?.let {receipt.addProperty("destinationRef",it.ref)}
+        return receipt
+    }
+    fun execute(plan: Plan, progress: (JsonObject)->Unit, cancelled: ()->Boolean, includeTargetProof:Boolean=false): JsonObject {
         require(System.currentTimeMillis()<=plan.expires) { "操作计划已过期，请重新粘贴" }
         staging.mkdirs();check(staging.isDirectory) {"无法创建传输暂存目录"}
         val folder=File(staging,UUID.randomUUID().toString()).apply { check(mkdir()) {"无法创建传输暂存目录"} }
@@ -259,6 +279,14 @@ class NativeTransferEngine(private val staging: File) {
                 summarizePreserved(results,items)
                 results.addProperty("state",if(all)"completed" else "completed-with-errors")
             } else {results.addProperty("state","completed");results.addProperty("sourceCleanupState","not-required")}
+            if(includeTargetProof&&results.get("moveCommitted")?.asBoolean==true) {
+                results.add("verifiedTargets",JsonArray().apply {targetTrees.flatten().forEach {entry->
+                    val original=entry.node;val live=plan.target.stat(original.ref)?:error("重命名目标已改变")
+                    check(live.identity==original.identity&&live.directory==original.directory&&live.bytes==original.bytes) {"重命名目标已被替换"}
+                    if(!live.directory)check(live.fingerprint==original.fingerprint) {"重命名目标已改变"}
+                    add(JsonObject().apply {addProperty("ref",live.ref);addProperty("identity",live.identity);addProperty("fingerprint",live.fingerprint);addProperty("isDirectory",live.directory)})
+                }})
+            }
             phase=results.get("state").asString;emit()
         } catch(t:Throwable) {
             val cancelledState=t is CancellationException || cancelled()
@@ -293,3 +321,6 @@ class NativeTransferEngine(private val staging: File) {
         }
     }
 }
+
+/** Keeps truthful partial/cancelled source cleanup receipts across the rename adapter boundary. */
+internal class NativeRenameCopyException(val receipt:JsonObject):IllegalStateException("兼容重命名未全部确认完成，请查看逐项复制与源清理结果")

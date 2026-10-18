@@ -64,6 +64,7 @@ class BaiduNetdiskRuntime private constructor(context: Context) {
         BaiduBinaryFileClient(config)
     }
     internal fun nativeTransfers(): NativeFileTransferRuntime = NativeFileTransferRuntime.get(context)
+    internal fun nativePreviews(): NativeFilePreviewRuntime = NativeFilePreviewRuntime.get(context)
     fun authorization(): JsonObject {
         val config=secrets.read();val client=BaiduNetdiskPolicy.get(config,"clientId")
         require(client.isNotBlank()) { "请先填写 API Key（clientId）" }

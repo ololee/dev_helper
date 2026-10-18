@@ -38,4 +38,32 @@ class NativeFileTransferToolsTest {
         assertFalse(schema.toString().contains("accessToken"))
         assertFalse(schema.toString().contains("command"))
     }
+
+    @Test fun mutationsHaveAReadOnlyPlanAndUseTheSameExplicitDestructiveExecutor() {
+        val tools = BaiduNetdiskTools.list().map { it.asJsonObject }.associateBy { it.get("name").asString }
+        val plan = tools.getValue("netdisk_file_operation_plan")
+        val properties = plan.getAsJsonObject("inputSchema").getAsJsonObject("properties")
+        assertEquals(setOf("rename", "trash"), properties.getAsJsonObject("operation").getAsJsonArray("enum").map { it.asString }.toSet())
+        assertEquals(setOf("scope", "operation", "items", "name"), properties.keySet())
+        assertTrue(plan.getAsJsonObject("annotations").get("readOnlyHint").asBoolean)
+        assertFalse(plan.getAsJsonObject("annotations").get("destructiveHint").asBoolean)
+        assertTrue(NativeFileTransferTools.handles("netdisk_file_operation_plan"))
+    }
+
+    @Test fun previewsUseScopedReferencesAndBinaryHttpInsteadOfEmbeddingImagesOrSecrets() {
+        val all = BaiduNetdiskTools.list().map { it.asJsonObject }
+        val names = all.map { it.get("name").asString }
+        assertEquals(names.size, names.distinct().size)
+        val tools = all.associateBy { it.get("name").asString }
+        for (name in listOf("netdisk_file_preview_info", "netdisk_file_preview_open", "netdisk_file_preview_job", "netdisk_file_preview_close")) {
+            assertTrue(NativeFilePreviewTools.handles(name))
+            val schema = tools.getValue(name).getAsJsonObject("inputSchema")
+            assertFalse(schema.get("additionalProperties").asBoolean)
+            assertFalse(schema.toString().contains("base64", true))
+            assertFalse(schema.toString().contains("accessToken"))
+            assertFalse(schema.toString().contains("localPath"))
+            assertFalse(tools.getValue(name).getAsJsonObject("annotations").get("destructiveHint").asBoolean)
+        }
+        assertEquals(setOf("scope", "uri", "path", "fsId"), tools.getValue("netdisk_file_preview_open").getAsJsonObject("inputSchema").getAsJsonObject("properties").keySet())
+    }
 }

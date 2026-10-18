@@ -31,20 +31,67 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
     private val jobsFile=File(home,"jobs.json")
     private val roots=mutableListOf<String>()
     private val records=linkedMapOf<String,JsonObject>()
-    private val plans=mutableMapOf<String,NativeTransferEngine.Plan>()
+    private data class PendingPlan(val transfer:NativeTransferEngine.Plan?=null,val mutation:NativeFileOperationEngine.Plan?=null) {
+        val id get()=transfer?.id?:mutation!!.id
+        val digest get()=transfer?.digest?:mutation!!.digest
+        val expires get()=transfer?.expires?:mutation!!.expires
+        val operation get()=transfer?.operation?:mutation!!.operation
+        val source get()=transfer?.source?:mutation!!.store
+        val target get()=transfer?.target?:mutation!!.store
+        val account get()=transfer?.account?:mutation?.account
+        val bytes get()=transfer?.bytes?:mutation!!.bytes
+        val fileCount get()=transfer?.fileCount?:mutation!!.files
+        val totalBytes get()=if(transfer!=null)bytes*4 else bytes
+        val scope get()=if(transfer!=null)"transfer" else source.scope
+        fun publicJson()=transfer?.publicJson()?:mutation!!.json()
+    }
+    private val plans=mutableMapOf<String,PendingPlan>()
     private val cancellations=mutableMapOf<String,AtomicBoolean>()
     private val activeCount=AtomicInteger(0)
     private val parentRefs=ConcurrentHashMap<String,String>()
     private val executor=Executors.newSingleThreadExecutor { r->Thread(r,"native-file-transfer").apply {isDaemon=true} }
     private val engine=NativeTransferEngine(File(home,"staging"))
+    private val operationEngine=NativeFileOperationEngine()
     private var lastPersist=0L
     init {
+        // A process restart never resumes preview downloads. Remove only our exact abandoned stage filenames.
+        val oldPreviews=File(home,"previews")
+        if(oldPreviews.isDirectory&&!Files.isSymbolicLink(oldPreviews.toPath())) {
+            val ownedName=Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.source")
+            oldPreviews.listFiles()?.forEach {file->
+                if(ownedName.matches(file.name)&&!Files.isSymbolicLink(file.toPath()))runCatching {
+                    val stat=Os.lstat(file.path)
+                    if(OsConstants.S_ISREG(stat.st_mode)&&file.canonicalFile.parentFile==oldPreviews.canonicalFile)file.delete()
+                }
+            }
+        }
         runCatching {JsonParser.parseString(rootsFile.readText()).asJsonArray.forEach { roots.add(it.asString) }}
         runCatching {JsonParser.parseString(jobsFile.readText()).asJsonArray.forEach { element ->
             val job=element.asJsonObject
             if(job.get("state")?.asString in listOf("queued","running")) {
                 job.addProperty("state","interrupted");job.addProperty("error","应用已重启，任务已中断。请查看已有目标后重新选择；不会恢复删除源文件。")
                 job.addProperty("cancelSupported",false);job.addProperty("interruptedAt",System.currentTimeMillis())
+                val operation=job.get("operation")?.asString
+                fun clearUnfinishedRows(value:JsonObject) {
+                    value.getAsJsonArray("items")?.forEach {element->val row=element.asJsonObject;val state=row.get("state")?.asString
+                        val settled=state in setOf("skipped","failed","cancelled","partial","unknown","completed-with-errors")||
+                            (state=="completed"&&(operation!="move"||row.get("sourceCleanupState")?.asString=="completed"))
+                        if(!settled) {
+                            row.addProperty("state","unknown");row.add("sourcePreserved",com.google.gson.JsonNull.INSTANCE)
+                            if(operation=="trash"||row.has("deleted"))row.add("deleted",com.google.gson.JsonNull.INSTANCE)
+                            if(operation=="rename"||row.has("renamed"))row.add("renamed",com.google.gson.JsonNull.INSTANCE)
+                            if(operation=="move"||row.has("sourceCleanupState"))row.addProperty("sourceCleanupState","unknown")
+                            row.addProperty("interruptionNote","应用在操作中重启，源文件和已有目标需要核对；不会重放写入或删除。")
+                        }
+                    }
+                    if(value.has("sourcePreserved"))value.add("sourcePreserved",com.google.gson.JsonNull.INSTANCE)
+                    if(value.has("moveCommitted"))value.addProperty("moveCommitted",false)
+                }
+                clearUnfinishedRows(job)
+                job.getAsJsonObject("result")?.let {clearUnfinishedRows(it)}
+                val progress=job.getAsJsonObject("progress")?:JsonObject().also {job.add("progress",it)}
+                clearUnfinishedRows(progress);progress.addProperty("phase","interrupted")
+                progress.addProperty("interruptionNote","任务已中断，未确认完成的项目状态未知，请核对原件和目标。")
             }
             records[job.get("jobId").asString]=job
         }}
@@ -87,23 +134,33 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             add("items",JsonArray().apply {rows.drop(offset).take(limit).forEach {n -> add(nodeJson(n))}})
         }
     }
+    /** Native explorer listings share the scoped HTTP data plane used by transfers. */
+    fun cloudFiles(args: JsonObject): JsonObject = NativeCloudDirectoryPolicy.list(cloudClient(), args)
     fun plan(args: JsonObject): JsonObject {
-        only(args,setOf("scope","destinationScope","operation","items","destination"))
-        val source=text(args,"scope");val target=text(args,"destinationScope")
-        require(source in listOf("local","netdisk") && target in listOf("local","netdisk") && source!=target) {"请选择本地和百度网盘之间的目标"}
-        val op=text(args,"operation");val array=args.get("items")?.takeIf {it.isJsonArray}?.asJsonArray?:error("items 必须为数组")
+        only(args,setOf("scope","destinationScope","operation","items","destination","name"))
+        val source=text(args,"scope");require(source in setOf("local","netdisk")) {"请选择手机本地或百度网盘"}
+        val op=text(args,"operation");require(op in setOf("copy","move","rename","trash")) {"文件操作无效"}
+        val mutation=op in setOf("rename","trash")
+        if(mutation)require(!args.has("destinationScope")&&!args.has("destination")) {"重命名和删除不接受目标目录"}
+        else require(!args.has("name")) {"复制和剪切不接受名称"}
+        if(op=="trash")require(!args.has("name")) {"删除不接受名称"}
+        val array=args.get("items")?.takeIf {it.isJsonArray}?.asJsonArray?:error("items 必须为数组")
         require(array.size() in 1..100) {"每批选择 1 至 100 个项目"}
-        val destination=args.get("destination")?.takeIf {it.isJsonObject}?.asJsonObject?:error("请选择目标文件夹")
-        only(destination,if(target=="local")setOf("uri") else setOf("path"))
         val refs=array.map {element ->require(element.isJsonObject) {"项目必须为对象"};val item=element.asJsonObject
             only(item,if(source=="local")setOf("uri") else setOf("path","fsId"));text(item,if(source=="local")"uri" else "path") }
-        val cloud=CloudStore(cloudClient())
-        val local=LocalStore();val sourceStore=if(source=="local")local else cloud;val targetStore=if(target=="local")local else cloud
+        val cloud=if(source=="netdisk"||!mutation)CloudStore(cloudClient()) else null
+        val local=LocalStore();val sourceStore=if(source=="local")local else cloud!!
         array.forEachIndexed { index,element ->if(source=="netdisk"&&element.asJsonObject.has("fsId")) {
-            val node=cloud.stat(refs[index])?:error("网盘文件不存在")
+            val node=cloud!!.stat(refs[index])?:error("网盘文件不存在")
             require(node.extra.get("fsId")?.asString==text(element.asJsonObject,"fsId")) {"网盘文件 ID 已改变，请刷新列表"}
         } }
-        val plan=engine.plan(sourceStore,targetStore,op,refs,text(destination,if(target=="local")"uri" else "path"),cloud.client.account())
+        val plan=if(mutation)PendingPlan(mutation=operationEngine.plan(sourceStore,op,refs,if(op=="rename")text(args,"name") else null,cloud?.client?.account())) else {
+            val target=text(args,"destinationScope");require(target in setOf("local","netdisk")&&target!=source) {"请选择本地和百度网盘之间的目标"}
+            val destination=args.get("destination")?.takeIf {it.isJsonObject}?.asJsonObject?:error("请选择目标文件夹")
+            only(destination,if(target=="local")setOf("uri") else setOf("path"))
+            val targetStore=if(target=="local")local else cloud!!
+            PendingPlan(transfer=engine.plan(sourceStore,targetStore,op,refs,text(destination,if(target=="local")"uri" else "path"),cloud!!.client.account()))
+        }
         synchronized(lock) {plans.entries.removeAll {it.value.expires<System.currentTimeMillis()};require(plans.size<100) {"操作计划太多，请稍后重试"};plans[plan.id]=plan}
         return plan.publicJson()
     }
@@ -114,17 +171,17 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
         synchronized(lock) {records.values.firstOrNull {it.get("planId")?.asString==planId}?.let {return it.deepCopy()}}
         val id=UUID.randomUUID().toString();val cancellation=AtomicBoolean(false)
         val record=JsonObject().apply {
-            addProperty("id",id);addProperty("jobId",id);addProperty("planId",planId);addProperty("scope","transfer")
+            addProperty("id",id);addProperty("jobId",id);addProperty("planId",planId);addProperty("scope",plan.scope)
             addProperty("sourceScope",plan.source.scope);addProperty("destinationScope",plan.target.scope);addProperty("operation",plan.operation)
             addProperty("state","queued");addProperty("createdAt",System.currentTimeMillis());addProperty("updatedAt",System.currentTimeMillis())
             addProperty("cancelSupported",true);addProperty("cancelRequested",false);addProperty("encoding","binary")
             add("items",plan.publicJson().getAsJsonArray("items"));add("progress",JsonObject().apply {
-                addProperty("phase","queued");addProperty("bytesTransferred",0);addProperty("totalBytes",plan.bytes*4)
+                addProperty("phase","queued");addProperty("bytesTransferred",0);addProperty("totalBytes",plan.totalBytes)
                 addProperty("fileCount",plan.fileCount);addProperty("completedFiles",0);addProperty("currentFile","")
             })
         }
-        val accepted=configurationGuard {
-            check(cloudClient().account()==plan.account) {"百度账号或应用配置已改变，请重新粘贴"}
+        val enqueue={
+            if(plan.account!=null)check(cloudClient().account()==plan.account) {"百度账号或应用配置已改变，请重新预览"}
             if(foregroundStarter!=null)foregroundStarter.invoke() else NativeFileTransferService.ensureStarted(context)
             synchronized(lock) {
                 val existing=records.values.firstOrNull {it.get("planId")?.asString==planId}
@@ -135,14 +192,17 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
                 }
             }
         }
+        val accepted=if(plan.account!=null)configurationGuard(enqueue) else enqueue()
         if(accepted.get("jobId").asString!=id)return accepted
         executor.submit {
             try {
                 synchronized(lock) {record.addProperty("state","running");persist()}
-                val result=engine.execute(plan,{fields -> synchronized(lock) {
+                val onProgress:(JsonObject)->Unit={fields -> synchronized(lock) {
                     record.add("progress",fields.deepCopy());fields.get("items")?.let {record.add("items",it.deepCopy())}
                     record.addProperty("updatedAt",System.currentTimeMillis());if(System.currentTimeMillis()-lastPersist>500)persist()
-                }},{cancellation.get()})
+                }}
+                val result=if(plan.transfer!=null)engine.execute(plan.transfer,onProgress,{cancellation.get()})
+                    else operationEngine.execute(plan.mutation!!,onProgress,{cancellation.get()})
                 synchronized(lock) {
                     record.add("result",result);record.add("items",result.getAsJsonArray("items").deepCopy())
                     record.addProperty("state",result.get("state").asString);record.addProperty("cancelSupported",false)
@@ -161,6 +221,75 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
         val record=records[id]?:error("传输任务不存在")
         if(active(record)) {cancellations[id]?.set(true);record.addProperty("cancelRequested",true);record.addProperty("updatedAt",System.currentTimeMillis());persist()}
         record.deepCopy()
+    }
+    /** Read-only, scoped preview sources. No caller-provided filesystem path is accepted as a source. */
+    fun previewMetadata(args:JsonObject,cancelled:()->Boolean={false}):JsonObject {
+        val (_,node)=previewNode(args,cancelled)
+        return previewJson(text(args,"scope"),node)
+    }
+    fun copyPreviewSource(args:JsonObject,destination:File,progress:(Long)->Unit,cancelled:()->Boolean):JsonObject {
+        val (store,node)=previewNode(args,cancelled);val checkedDestination=requirePreviewDestination(destination)
+        val temporaryDirectory=File(home,"previews").apply {check(mkdirs()||isDirectory) {"无法创建预览暂存目录"}}
+        val temporary=File(temporaryDirectory,UUID.randomUUID().toString()+".source")
+        var created=false
+        try {
+            store.read(node,temporary,progress,cancelled)
+            check(temporary.isFile&&temporary.length()==node.bytes) {"预览源文件长度不符"}
+            val current=store.stat(node.ref)?:error("预览源文件已不存在")
+            check(current.identity==node.identity&&current.fingerprint==node.fingerprint) {"预览源文件已改变，请重新打开"}
+            val hash=NativeTransferEngine.sha256(temporary,cancelled)
+            if(cancelled())throw CancellationException()
+            val held=Os.lstat(temporary.path)
+            check(OsConstants.S_ISREG(held.st_mode)) {"预览暂存文件已改变"}
+            NativeFileAtomicMove.commitPreview(temporary.parentFile!!.canonicalPath,checkedDestination.parentFile!!.canonicalPath,temporary.name,checkedDestination.name,held.st_dev,held.st_ino)
+            created=true
+            if(cancelled())throw CancellationException()
+            return previewJson(text(args,"scope"),node).apply {addProperty("sha256",hash);addProperty("verified",true)}
+        } catch(t:Throwable) {if(created)runCatching {checkedDestination.delete()};throw t}
+        finally {temporary.delete()}
+    }
+    fun readPreviewPrefix(args:JsonObject,maxBytes:Int,cancelled:()->Boolean):ByteArray {
+        require(maxBytes in 1..256*1024) {"文本预览最多读取 256 KiB"}
+        val (store,node)=previewNode(args,cancelled)
+        val bytes=if(store is LocalStore)store.prefix(node,maxBytes,cancelled)
+            else (store as CloudStore).client.previewPrefix(node.extra,maxBytes,cancelled)
+        require(bytes.size<=maxBytes) {"预览数据超过范围"}
+        val current=store.stat(node.ref)?:error("预览源文件已不存在")
+        check(current.identity==node.identity&&current.fingerprint==node.fingerprint) {"预览源文件已改变，请重新打开"}
+        return bytes
+    }
+    private fun previewNode(args:JsonObject,cancelled:()->Boolean={false}):Pair<NativeTransferStore,TransferNode> {
+        if(cancelled())throw CancellationException()
+        only(args,setOf("scope","uri","path","fsId","expectedFingerprint","expectedIdentity"))
+        val scope=text(args,"scope");require(scope in setOf("local","netdisk")) {"预览来源无效"}
+        if(scope=="local")require(!args.has("path")&&!args.has("fsId")) {"本地预览只接受授权 URI"} else require(!args.has("uri")) {"网盘预览只接受应用目录内路径"}
+        val store:NativeTransferStore=if(scope=="local")LocalStore() else CloudStore(cloudClient(),cancelled)
+        val node=store.stat(text(args,if(scope=="local")"uri" else "path"))?:error("预览文件不存在")
+        require(!node.directory) {"文件夹请打开目录查看"}
+        if(args.has("fsId"))require(text(args,"fsId")==node.extra.get("fsId")?.asString) {"网盘文件 ID 已改变"}
+        if(args.has("expectedFingerprint"))check(text(args,"expectedFingerprint")==node.fingerprint) {"预览源文件已改变，请重新打开"}
+        if(args.has("expectedIdentity"))check(text(args,"expectedIdentity")==node.identity) {"预览源文件已被替换，请重新打开"}
+        if(cancelled())throw CancellationException()
+        return store to node
+    }
+    private fun previewJson(scope:String,node:TransferNode):JsonObject=JsonObject().apply {
+        val extension=node.name.substringAfterLast('.',"").lowercase()
+        val mime=android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)?:java.net.URLConnection.guessContentTypeFromName(node.name)?:"application/octet-stream"
+        addProperty("scope",scope);addProperty("ref",node.ref);addProperty(if(scope=="local")"uri" else "path",node.ref)
+        node.extra.get("fsId")?.let {add("fsId",it.deepCopy())};addProperty("name",node.name);addProperty("bytes",node.bytes)
+        addProperty("mime",mime);addProperty("mimeType",mime);addProperty("modifiedAt",node.modified);addProperty("isDirectory",false)
+        addProperty("fingerprint",node.fingerprint);addProperty("identity",node.identity)
+    }
+    private fun requirePreviewDestination(destination:File):File {
+        require(!destination.exists()&&!Files.isSymbolicLink(destination.toPath())) {"预览目的文件必须不存在"}
+        val parent=destination.absoluteFile.parentFile?:error("预览目的目录无效")
+        require(parent.isDirectory) {"预览目的目录必须已创建"}
+        val canonicalParent=parent.canonicalFile
+        val safeRoots=listOf(context.cacheDir.canonicalFile,context.filesDir.canonicalFile)
+        require(safeRoots.any {canonicalParent==it||canonicalParent.path.startsWith(it.path+File.separator)}) {"预览临时文件必须位于本应用私有目录"}
+        var part:File?=canonicalParent
+        while(part!=null) {require(!Files.isSymbolicLink(part.toPath())) {"预览目的目录不能包含链接"};if(safeRoots.contains(part))break;part=part.parentFile}
+        return File(canonicalParent,destination.name)
     }
     private fun cloudClient():NativeTransferCloud=cloudOverride?:BaiduNetdiskRuntime.get(context).binaryClient()
     private fun <T> configurationGuard(block:()->T):T=if(cloudOverride!=null)block() else BaiduNetdiskRuntime.get(context).withTransferConfigurationGuard(block)
@@ -275,6 +404,16 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             return null
         }
         override fun isRoot(node:TransferNode):Boolean = node.ref==Uri.fromFile(defaultRoot).toString() || (Uri.parse(node.ref).scheme=="content" && DocumentsContract.getDocumentId(Uri.parse(node.ref))==DocumentsContract.getTreeDocumentId(Uri.parse(node.ref)))
+        fun prefix(node:TransferNode,maxBytes:Int,cancelled:()->Boolean):ByteArray {
+            val current=stat(node.ref)?:error("预览文件不存在")
+            check(current.fingerprint==node.fingerprint&&current.identity==node.identity&&!node.directory) {"预览文件已改变"}
+            val input=if(Uri.parse(node.ref).scheme=="file") {
+                val fd=Os.open(file(node.ref).path,OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,0);val stream=FileInputStream(fd)
+                try {val stat=Os.fstat(fd);check("${stat.st_dev}:${stat.st_ino}"==node.identity&&OsConstants.S_ISREG(stat.st_mode)) {"预览文件已被替换"}}catch(t:Throwable){stream.close();throw t};stream
+            } else resolver.openInputStream(document(node.ref))?:error("无法读取手机文件")
+            return input.use {source->val out=java.io.ByteArrayOutputStream(minOf(maxBytes,65536));val buffer=ByteArray(32768)
+                while(out.size()<maxBytes) {if(cancelled())throw CancellationException();val n=source.read(buffer,0,minOf(buffer.size,maxBytes-out.size()));if(n<0)break;out.write(buffer,0,n)};out.toByteArray()}
+        }
         override fun read(node:TransferNode,destination:File,progress:(Long)->Unit,cancelled:()->Boolean) {
             val current=stat(node.ref)?:error("手机源文件不存在");check(current.fingerprint==node.fingerprint&&!current.directory) {"手机文件已改变"}
             val input=if(Uri.parse(node.ref).scheme=="file") {
@@ -301,8 +440,10 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             NativeTransferEngine.safeName(name);writable(parent.ref);check(child(parent,name)==null) {"目标已存在同名文件"}
             if(Uri.parse(parent.ref).scheme=="file") {
                 val target=File(file(parent.ref),name);val fd=Os.open(target.path,OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW,384)
-                try {source.inputStream().use {input->FileOutputStream(fd).use {out->copy(input,out,progress,cancelled);out.fd.sync()}}}
-                catch(t:Throwable) {runCatching {target.delete()};throw t}
+                // Keep any incomplete exclusive target on failure. A path can be
+                // replaced externally while its fd is held; unlinking by name
+                // would risk deleting the replacement instead of our own file.
+                FileOutputStream(fd).use {out->source.inputStream().use {input->copy(input,out,progress,cancelled)};out.fd.sync()}
                 return fromFile(target)?:error("手机文件写入后不可见")
             }
             val created=DocumentsContract.createDocument(resolver,document(parent.ref),"application/octet-stream",name)?:error("无法创建手机文件")
@@ -311,6 +452,51 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             try {source.inputStream().use {input->resolver.openOutputStream(document(created.toString()),"wt")?.use {out->copy(input,out,progress,cancelled)}?:error("手机文件不可写")}}
             catch(t:Throwable) {runCatching {DocumentsContract.deleteDocument(resolver,created)};throw t}
             return fromDocument(created,parent.ref)?:error("手机文件写入后不可见")
+        }
+        override fun rename(node:TransferNode,newName:String):TransferNode {
+            require(!isRoot(node)) {"不能重命名授权根目录"};NativeTransferEngine.safeName(newName);writable(node.ref)
+            val current=stat(node.ref)?:error("源文件不存在")
+            check(current.identity==node.identity&&current.fingerprint==node.fingerprint) {"源文件已改变，请重新预览"}
+            if(newName==node.name)return current
+            val parent=stat(node.parent?:error("无法确认父目录"))?:error("源父目录不存在")
+            check(child(parent,newName)==null) {"目标已存在同名项目，未覆盖"}
+            if(Uri.parse(node.ref).scheme=="file") {
+                val source=file(node.ref);val identity=Os.lstat(source.path)
+                check("${identity.st_dev}:${identity.st_ino}"==node.identity) {"源文件已被替换"}
+                NativeFileAtomicMove.rename(file(parent.ref).path,source.name,newName,identity.st_dev,identity.st_ino)
+                val result=fromFile(File(file(parent.ref),newName))?:error("无法确认重命名结果")
+                check(result.identity==node.identity&&stat(node.ref)==null) {"重命名结果不确定，请核对文件"}
+                return result
+            }
+            val renamed=DocumentsContract.renameDocument(resolver,document(node.ref),newName)?:error("系统未确认重命名结果，请核对文件")
+            parentCache[renamed.toString()]=parent.ref
+            val result=fromDocument(renamed,parent.ref)?:error("无法确认重命名结果")
+            val originalRef=stat(node.ref)
+            val oldAddressGone=originalRef==null||(result.ref==node.ref&&originalRef.identity==result.identity&&originalRef.name==newName)
+            check(result.name==newName&&result.directory==node.directory&&result.bytes==node.bytes&&oldAddressGone) {"系统重命名结果不确定，请核对文件"}
+            result.extra.addProperty("_renameOriginalIdentity",node.identity);result.extra.addProperty("_renameVerified",true)
+            return result
+        }
+        override fun rename(node:TransferNode,newName:String,inventory:List<NativeTransferEngine.Entry>,progress:(JsonObject)->Unit,cancelled:()->Boolean):TransferNode {
+            try {return rename(node,newName)}catch(unsupported:NativeRenameUnsupportedException) {
+                // Only an explicit unsupported syscall result may enter this path.
+                // Never replace an occupied target or retry an unknown rename receipt.
+                require(Uri.parse(node.ref).scheme=="file") {"此存储不支持兼容重命名"}
+                if(cancelled())throw CancellationException("操作已取消")
+                val current=stat(node.ref)?:error("重命名源已不存在")
+                check(current.identity==node.identity&&current.fingerprint==node.fingerprint) {"重命名源已改变"}
+                val parent=stat(node.parent?:error("无法确认父目录"))?:error("父目录不存在")
+                check(child(parent,newName)==null) {"目标已存在同名项目，未覆盖"}
+                val receipt=engine.renameByCopy(this,node,newName,inventory,progress,cancelled)
+                if(receipt.get("moveCommitted")?.asBoolean!=true||receipt.get("state")?.asString!="completed")throw NativeRenameCopyException(receipt)
+                try {
+                    val result=child(parent,newName)?:throw NativeRenameCopyException(receipt)
+                    if(stat(node.ref)!=null)throw NativeRenameCopyException(receipt)
+                    result.extra.addProperty("_renameOriginalIdentity",node.identity);result.extra.addProperty("_renameVerified",true)
+                    result.extra.add("_renameCopyResult",receipt.deepCopy())
+                    return result
+                }catch(t:Throwable) {if(t is NativeRenameCopyException)throw t;throw NativeRenameCopyException(receipt)}
+            }
         }
         override fun remove(node:TransferNode):Boolean {
             require(!isRoot(node)) {"不能删除授权目录"};writable(node.ref)
@@ -321,7 +507,7 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             return done&&stat(node.ref)==null
         }
     }
-    private class CloudStore(val client:NativeTransferCloud):NativeTransferStore {
+    private class CloudStore(val client:NativeTransferCloud,private val cancelled:()->Boolean={false}):NativeTransferStore {
         override val scope="netdisk"
         private fun normalize(meta:JsonObject):TransferNode {
             val path=meta.get("path")?.asString?:error("网盘文件路径缺失")
@@ -331,13 +517,14 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
             val finger=listOf(path,meta.get("fsId")?.asString,name,dir,bytes,modified,meta.get("md5")?.asString).joinToString(":")
             return TransferNode(path,if(path==client.rootPath())null else path.substringBeforeLast('/'),name,dir,bytes,modified,finger,meta.deepCopy(),identity=meta.get("fsId")?.asString?:error("网盘文件 ID 缺失"))
         }
-        override fun stat(ref:String)=client.stat(ref)?.let(::normalize)
-        override fun children(node:TransferNode)=client.list(node.ref).map(::normalize)
-        override fun child(parent:TransferNode,name:String):TransferNode? {NativeTransferEngine.safeName(name);return client.stat(parent.ref.trimEnd('/')+"/"+name)?.let(::normalize)}
+        override fun stat(ref:String)=client.stat(ref,cancelled)?.let(::normalize)
+        override fun children(node:TransferNode)=client.list(node.ref,cancelled).map(::normalize)
+        override fun child(parent:TransferNode,name:String):TransferNode? {NativeTransferEngine.safeName(name);return client.stat(parent.ref.trimEnd('/')+"/"+name,cancelled)?.let(::normalize)}
         override fun isRoot(node:TransferNode)=node.ref==client.rootPath()
         override fun read(node:TransferNode,destination:File,progress:(Long)->Unit,cancelled:()->Boolean) {client.download(node.extra,destination,progress,cancelled)}
         override fun createDirectory(parent:TransferNode,name:String)=normalize(client.mkdir(parent.ref.trimEnd('/')+"/"+NativeTransferEngine.safeName(name)))
         override fun write(parent:TransferNode,name:String,source:File,progress:(Long)->Unit,cancelled:()->Boolean)=normalize(client.upload(source,parent.ref.trimEnd('/')+"/"+NativeTransferEngine.safeName(name),progress,cancelled))
+        override fun rename(node:TransferNode,newName:String):TransferNode=normalize(client.rename(node.extra,NativeTransferEngine.safeName(newName)))
         override fun remove(node:TransferNode):Boolean {val response=client.delete(node.extra);return response.get("deleted")?.asBoolean==true&&response.get("verified")?.asBoolean==true}
     }
     private fun copy(input:java.io.InputStream,out:java.io.OutputStream,progress:(Long)->Unit,cancelled:()->Boolean) {
@@ -353,4 +540,38 @@ class NativeFileTransferRuntime private constructor(context: Context, private va
     }
     private fun integer(args:JsonObject,key:String,fallback:Int,min:Int,max:Int):Int {if(!args.has(key))return fallback
         return runCatching {args.get(key).asBigDecimal.intValueExact()}.getOrElse {error("$key 必须为整数")}.also {require(it in min..max) {"$key 超出范围"}}}
+}
+
+/** Pure directory validation and UI pagination; never initializes the legacy Android SDK. */
+internal object NativeCloudDirectoryPolicy {
+    fun list(client: NativeTransferCloud, args: JsonObject): JsonObject {
+        require(args.keySet().all { it in setOf("path", "offset", "limit") }) { "网盘目录参数包含未知字段" }
+        fun integer(key: String, fallback: Int, min: Int, max: Int): Int {
+            val raw = args.get(key) ?: return fallback
+            require(raw.isJsonPrimitive && raw.asJsonPrimitive.isNumber) { "$key 必须为整数" }
+            val value = runCatching { raw.asBigDecimal.intValueExact() }.getOrElse { throw IllegalArgumentException("$key 必须为整数") }
+            require(value in min..max) { "$key 超出范围" }; return value
+        }
+        val offset = integer("offset", 0, 0, Int.MAX_VALUE)
+        val limit = integer("limit", 100, 1, 1000)
+        val root = BaiduNetdiskPolicy.path(client.rootPath())
+        require(root.startsWith("/apps/") && root != "/apps/") { "网盘浏览必须限定到本应用目录" }
+        val config = JsonObject().apply { addProperty("remoteRoot", root) }
+        val requested = args.get("path")
+        require(requested == null || requested.isJsonPrimitive && requested.asJsonPrimitive.isString) { "path 必须为文本" }
+        val path = BaiduNetdiskPolicy.insideRoot(config, requested?.asString ?: root)
+        val seen = mutableSetOf<String>()
+        val allowed = setOf("path", "name", "fsId", "isDirectory", "bytes", "modifiedAt", "md5", "mimeType")
+        val rows = client.list(path).also { require(it.size <= 100_000) { "网盘目录过大，请分目录浏览" } }.map { row ->
+            val ref = row.get("path")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString ?: error("网盘目录项目缺少路径")
+            val checked = BaiduNetdiskPolicy.insideRoot(config, ref)
+            require(checked == ref && ref.substringBeforeLast('/') == path && seen.add(ref)) { "网盘目录结果不完整或路径不符，请刷新" }
+            JsonObject().apply { allowed.forEach { key -> row.get(key)?.let { add(key, it.deepCopy()) } } }
+        }.sortedWith(compareBy<JsonObject> { it.get("isDirectory")?.asBoolean != true }.thenBy { it.get("name")?.asString?.lowercase(java.util.Locale.ROOT).orEmpty() }.thenBy { it.get("path").asString })
+        return JsonObject().apply {
+            addProperty("path", path); addProperty("offset", offset); addProperty("limit", limit)
+            addProperty("hasMore", offset.toLong() + limit < rows.size); addProperty("total", rows.size)
+            add("files", JsonArray().apply { rows.drop(offset).take(limit).forEach { add(it) } })
+        }
+    }
 }

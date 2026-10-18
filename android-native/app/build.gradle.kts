@@ -14,8 +14,8 @@ android {
         applicationId = "cn.ololee.devhelper"
         minSdk = 29
         targetSdk = 37
-        versionCode = 37
-        versionName = "2.13.0"
+        versionCode = 38
+        versionName = "2.14.0"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_shared" } }
 

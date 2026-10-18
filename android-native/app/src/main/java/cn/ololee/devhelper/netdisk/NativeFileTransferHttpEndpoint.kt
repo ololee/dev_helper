@@ -30,9 +30,26 @@ object NativeFileTransferHttpEndpoint {
             when {
                 route == "/status" -> { expected("GET"); fields(); json(200, runtime.status()) }
                 route == "/local" -> { expected("POST"); json(200, runtime.localFiles(fields("pathUri", "offset", "limit"))) }
-                route == "/plan" -> { expected("POST"); json(200, runtime.plan(fields("scope", "destinationScope", "operation", "items", "destination"))) }
+                route == "/plan" -> { expected("POST"); json(200, runtime.plan(fields("scope", "destinationScope", "operation", "items", "destination", "name"))) }
                 route == "/execute" -> { expected("POST"); json(202, runtime.execute(fields("planId", "planDigest"))) }
                 route == "/jobs" -> { expected("GET"); fields(); json(200, runtime.jobs()) }
+                route == "/preview/info" -> { expected("POST"); json(200, NativeFilePreviewRuntime.get(context).metadata(fields("scope", "uri", "path", "fsId"))) }
+                route == "/previews" -> { expected("POST"); json(202, NativeFilePreviewRuntime.get(context).start(fields("scope", "uri", "path", "fsId"))) }
+                route.startsWith("/previews/") -> {
+                    expected("GET"); fields()
+                    val parts = route.removePrefix("/previews/").split('/')
+                    require(parts.size == 2 && parts[0].matches(Regex("[0-9a-f-]{36}")) && parts[1] == "content") { "预览内容路径无效" }
+                    val content = NativeFilePreviewRuntime.get(context).binary(parts[0])
+                    HttpEndpoint.Response(200, content.mimeType, content.stream, content.bytes,
+                        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Disposition: attachment; filename=\"preview\"\r\nContent-Security-Policy: default-src 'none'; sandbox\r\n")
+                }
+                route.startsWith("/preview-jobs/") -> {
+                    val parts = route.removePrefix("/preview-jobs/").split('/')
+                    require(parts[0].matches(Regex("[0-9a-f-]{36}"))) { "预览任务 ID 无效" }
+                    if (parts.size == 1) { expected("GET"); fields(); json(200, NativeFilePreviewRuntime.get(context).job(parts[0])) }
+                    else if (parts.size == 2 && parts[1] == "cancel") { expected("POST"); fields(); json(200, NativeFilePreviewRuntime.get(context).cancel(parts[0])) }
+                    else json(404, JsonObject().apply { addProperty("error", "预览路由不存在") })
+                }
                 route.startsWith("/jobs/") -> {
                     val parts = route.removePrefix("/jobs/").split('/')
                     require(parts[0].matches(Regex("[0-9a-f-]{36}"))) { "传输任务 ID 无效" }

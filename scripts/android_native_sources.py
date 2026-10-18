@@ -18,6 +18,14 @@ ANDROID_FILES = (
     "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFileTransferHttpEndpoint.kt",
     "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFileTransferPresentation.kt",
     "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFileManagerActivity.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFileAtomicMove.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFileOperationEngine.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFilePreview.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFilePreviewPolicy.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFilePreviewRuntime.kt",
+    "app/src/main/java/cn/ololee/devhelper/netdisk/NativeFilePreviewTools.kt",
+    "app/src/main/cpp/native_file_ops.cpp",
+    "app/src/main/cpp/CMakeLists.txt",
     "app/src/main/java/cn/ololee/devhelper/netdisk/BaiduNetdiskRuntime.kt",
     "app/src/main/java/cn/ololee/devhelper/netdisk/BaiduNetdiskTools.kt",
     "app/src/main/java/cn/ololee/devhelper/netdisk/BaiduNetdiskActivity.kt",
@@ -29,12 +37,18 @@ ANDROID_FILES = (
     "app/src/test/java/cn/ololee/devhelper/netdisk/BaiduBinaryFileClientTest.kt",
     "app/src/test/java/cn/ololee/devhelper/netdisk/NativeFileTransferToolsTest.kt",
     "app/src/test/java/cn/ololee/devhelper/netdisk/NativeFileTransferPresentationTest.kt",
+    "app/src/test/java/cn/ololee/devhelper/netdisk/NativeFileOperationEngineTest.kt",
+    "app/src/test/java/cn/ololee/devhelper/netdisk/NativeFilePreviewPolicyTest.kt",
+    "app/src/test/java/cn/ololee/devhelper/netdisk/NativeCloudDirectoryPolicyTest.kt",
+    "app/src/test/java/cn/ololee/devhelper/netdisk/NativeRenameCopyTest.kt",
     "app/src/androidTest/java/cn/ololee/devhelper/netdisk/NativeFileTransferDeviceTest.kt",
+    "app/src/androidTest/java/cn/ololee/devhelper/netdisk/NativeFileOperationDeviceTest.kt",
+    "app/src/androidTest/java/cn/ololee/devhelper/netdisk/NativeFilePreviewDeviceTest.kt",
     "app/build.gradle.kts",
     "gradle/libs.versions.toml",
     "app/src/main/AndroidManifest.xml",
 )
-ALLOWED_SUFFIXES = frozenset({".kt", ".java", ".kts", ".xml", ".toml"})
+ALLOWED_SUFFIXES = frozenset({".kt", ".java", ".kts", ".xml", ".toml", ".cpp"})
 
 
 def release_files(source: Path) -> dict[str, Path]:
@@ -54,7 +68,7 @@ def release_files(source: Path) -> dict[str, Path]:
     files: dict[str, Path] = {}
     for relative in ANDROID_FILES:
         part = Path(relative)
-        if part.is_absolute() or ".." in part.parts or part.suffix not in ALLOWED_SUFFIXES:
+        if part.is_absolute() or ".." in part.parts or (part.suffix not in ALLOWED_SUFFIXES and part.name != "CMakeLists.txt"):
             raise ValueError("The Android release list contains a non-source path: " + relative)
         path = root / part
         current = root

@@ -22,10 +22,12 @@ object BaiduNetdiskTools {
         add("netdisk_job","Read one upload:<id> or download:<id> background task.","""{"jobId":{"type":"string"}}""",listOf("jobId"))
         add("netdisk_job_control","Pause, resume, or cancel a transfer. Cancel retains local files and remote originals.","""{"jobId":{"type":"string"},"action":{"type":"string","enum":["pause","resume","cancel"]}}""",listOf("jobId","action"),false)
         array.addAll(NativeFileTransferTools.list())
+        array.addAll(NativeFilePreviewTools.list())
         return array
     }
     @JvmStatic fun call(runtime:BaiduNetdiskRuntime,name:String,args:JsonObject):JsonObject {
         if(NativeFileTransferTools.handles(name))return NativeFileTransferTools.call(runtime.nativeTransfers(),name,args)
+        if(NativeFilePreviewTools.handles(name))return NativeFilePreviewTools.call(runtime.nativePreviews(),name,args)
         val allowed=when(name){"netdisk_status","netdisk_jobs"->setOf();"netdisk_list"->setOf("path","offset","limit");"netdisk_mkdir"->setOf("path");"netdisk_upload"->setOf("localPath","remoteDir");"netdisk_download"->setOf("fsId");"netdisk_job"->setOf("jobId");"netdisk_job_control"->setOf("jobId","action");else->throw IllegalArgumentException("未知网盘工具")}
         require(args.keySet().all {it in allowed}){"网盘参数包含未知字段"}
         return when(name){"netdisk_status"->runtime.status();"netdisk_jobs"->runtime.jobs();"netdisk_list"->runtime.files(args);"netdisk_mkdir"->runtime.mkdir(args);"netdisk_upload"->runtime.upload(args);"netdisk_download"->runtime.download(args);"netdisk_job"->runtime.job(required(args,"jobId"));else->runtime.action(required(args,"jobId"),required(args,"action"))}

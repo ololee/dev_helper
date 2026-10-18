@@ -57,7 +57,8 @@ internal class BaiduBinaryFileClient(
     private fun path(input: String, source: Boolean = false): String = BaiduNetdiskPolicy.insideRoot(config, input).also {
         require(!source || it != root) { "不能将网盘应用根目录作为文件操作源" }
     }
-    override fun list(path: String): List<JsonObject> = listDirectory(this.path(path), { false })
+    override fun list(path: String): List<JsonObject> = list(path, { false })
+    override fun list(path: String, cancelled: () -> Boolean): List<JsonObject> = listDirectory(this.path(path), cancelled)
     private fun listDirectory(path: String, cancelled: () -> Boolean): List<JsonObject> {
         val rows = ArrayList<JsonObject>()
         val seen = HashSet<String>()
@@ -66,11 +67,13 @@ internal class BaiduBinaryFileClient(
             val value = try { json("GET", FILE_API, mapOf("method" to "list", "dir" to path,
                 "start" to start.toString(), "limit" to "1000", "order" to "name", "desc" to "0"), cancelled = cancelled) }
             catch (error: BinaryProviderException) {
+                checkCancelled(cancelled)
                 if (error.providerCode == -9L && path == root) return rememberListing(path, emptyList())
                 throw error
             }
             val entries = value.get("list")?.takeIf { it.isJsonArray }?.asJsonArray ?: error("百度文件列表格式无效")
             for (entry in entries) {
+                checkCancelled(cancelled)
                 require(entry.isJsonObject) { "百度文件列表项目格式无效" }
                 val item = metadata(entry.asJsonObject)
                 val itemPath = string(item, "path")
@@ -81,32 +84,39 @@ internal class BaiduBinaryFileClient(
                 require(it.isJsonPrimitive) { "百度分页标记无效" }
                 if (it.asJsonPrimitive.isBoolean) it.asBoolean else integer(value, "has_more") != 0L
             } ?: (entries.size() >= 1000)
-            if (!hasMore) return rememberListing(path, rows)
+            if (!hasMore) { checkCancelled(cancelled); return rememberListing(path, rows) }
             require(entries.size() > 0) { "百度分页未返回项目，未确认目录完整性" }
         }
         error("网盘目录超过单次确认范围，请分目录操作")
     }
-    override fun stat(path: String): JsonObject? {
+    override fun stat(path: String): JsonObject? = stat(path, { false })
+    override fun stat(path: String, cancelled: () -> Boolean): JsonObject? {
+        checkCancelled(cancelled)
         val target = this.path(path)
         if (target == root) {
-            listDirectory(target, { false })
+            listDirectory(target, cancelled)
+            checkCancelled(cancelled)
             return JsonObject().apply { addProperty("path", root); addProperty("name", root.substringAfterLast('/'))
                 addProperty("fsId", "0"); addProperty("isDirectory", true); addProperty("bytes", 0L); addProperty("modifiedAt", 0L); addProperty("md5", "") }
         }
         knownFileIds[target]?.let { id ->
-            val cached = try { fileInfo(id, false) }
+            val cached = try { fileInfo(id, false, cancelled) }
             catch (_: BinaryFileMissingException) { null }
             catch (_: BinaryFileOutsideRootException) { null }
             catch (error: BinaryProviderException) { if (error.providerCode == -9L) null else throw error }
+            checkCancelled(cancelled)
             if (cached != null && string(cached, "path") == target) return cached
             // An old ID may have been removed or moved. Re-list the parent to detect a replacement.
             knownFileIds.remove(target, id)
         }
-        return statFromParent(target)
+        return statFromParent(target, cancelled)
     }
-    private fun statFromParent(target: String): JsonObject? {
-        val match = listDirectory(parent(target), { false }).singleOrNull { string(it, "path") == target } ?: return null
-        return fileInfo(string(match, "fsId"), false).also {
+    private fun statFromParent(target: String, cancelled: () -> Boolean = { false }): JsonObject? {
+        val listing = listDirectory(parent(target), cancelled)
+        checkCancelled(cancelled)
+        val match = listing.singleOrNull { string(it, "path") == target } ?: return null
+        return fileInfo(string(match, "fsId"), false, cancelled).also {
+            checkCancelled(cancelled)
             require(string(it, "path") == target) { "网盘文件 ID 与路径不一致" }
         }
     }
@@ -228,24 +238,11 @@ internal class BaiduBinaryFileClient(
         expectedSha?.let { require(Regex("[0-9a-fA-F]{64}").matches(it)) { "SHA256 格式无效" } }
         require(!destination.exists()) { "本地目标已存在，不会覆盖" }
         destination.parentFile?.let { require(it.isDirectory) { "本地下载目标目录不存在" } }
-        var link = downloadUrl(string(current, "_dlink"))
         val sha = MessageDigest.getInstance("SHA-256")
         var copied = 0L
         var created = false
         try {
-            var redirects = 0
-            var reply: BinaryReply
-            while (true) {
-                checkCancelled(cancelled)
-                reply = transport.open(Request.Builder().url(link).get().header("User-Agent", "pan.baidu.com")
-                    .header("Accept-Encoding", "identity").build(), cancelled)
-                if (reply.code !in setOf(301, 302, 303, 307, 308)) break
-                val location = reply.header("Location")
-                reply.close()
-                require(++redirects <= 5 && !location.isNullOrEmpty()) { "百度下载重定向无效" }
-                link = downloadUrl(link.toHttpUrl().resolve(location)!!.toString())
-            }
-            reply.use {
+            openDownload(string(current, "_dlink"), cancelled).use {
                 require(it.code in 200..299) { "百度下载失败，请检查网络或授权" }
                 Files.newOutputStream(destination.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { output ->
                     created = true
@@ -277,6 +274,93 @@ internal class BaiduBinaryFileClient(
             throw failure
         }
     }
+    override fun previewPrefix(meta: JsonObject, maxBytes: Int, cancelled: () -> Boolean): ByteArray {
+        require(maxBytes in 1..MAX_PREVIEW_BYTES) { "文本预览范围必须为 1 至 256 KiB" }
+        path(string(meta, "path"), true)
+        val declared = integer(meta, "bytes").also { require(it >= 0L) { "预览源文件大小无效" } }
+        checkCancelled(cancelled)
+        val current = fileInfo(string(meta, "fsId"), declared > 0L, cancelled)
+        require(sameSnapshot(meta, current) && !bool(current, "isDirectory")) { "网盘预览源已变化，请刷新后重试" }
+        val total = integer(current, "bytes")
+        val wanted = minOf(total, maxBytes.toLong()).toInt()
+        val prefix = ByteArray(wanted)
+        try {
+            if (wanted > 0) openDownload(string(current, "_dlink"), cancelled, "bytes=0-${wanted - 1}").use { response ->
+                require(response.code == 200 || response.code == 206) { "百度文本预览下载失败，请检查网络或授权" }
+                if (response.code == 206) {
+                    val range = Regex("bytes 0-([0-9]+)/([0-9]+)").matchEntire(response.header("Content-Range").orEmpty())
+                    require(range != null && range.groupValues[1].toLongOrNull() == wanted - 1L &&
+                        range.groupValues[2].toLongOrNull() == total) { "百度文本预览的 Content-Range 与请求不一致" }
+                    response.header("Content-Length")?.let { require(it.toLongOrNull() == wanted.toLong()) { "百度文本预览范围长度无效" } }
+                }
+                val encoding = response.header("Content-Encoding")
+                require(encoding == null || encoding.equals("identity", true)) { "百度返回了非原始字节的预览响应" }
+                var consumed = 0
+                while (consumed < wanted) {
+                    checkCancelled(cancelled)
+                    val read = response.input.read(prefix, consumed, minOf(IO_SIZE, wanted - consumed))
+                    require(read > 0) { "百度文本预览正文不足请求范围，未显示不完整内容" }
+                    consumed += read
+                }
+                // A server may ignore Range and return 200. Close now; do not read even one tail byte.
+            }
+            checkCancelled(cancelled)
+            require(sameSnapshot(meta, fileInfo(string(meta, "fsId"), false, cancelled))) { "读取期间网盘预览源已变化，请重新打开" }
+            checkCancelled(cancelled)
+            return prefix
+        } catch (failure: IOException) {
+            checkCancelled(cancelled)
+            throw IOException("百度文本预览读取中断，请检查网络后重新打开")
+        }
+    }
+    override fun rename(meta: JsonObject, newName: String): JsonObject {
+        val source = path(string(meta, "path"), true)
+        val name = BaiduNetdiskPolicy.fileName(newName)
+        val destination = path(parent(source) + "/" + name, true)
+        val live = fileInfo(string(meta, "fsId"), false)
+        require(sameSnapshot(meta, live)) { "网盘源在重命名前变化，未执行" }
+        if (destination == source) return live.apply {
+            addProperty("originalPath", source); addProperty("state", "completed")
+            addProperty("verified", true); addProperty("renamed", false); addProperty("unchanged", true)
+        }
+        // Always inspect the live target path. A cached source ID is never absence evidence.
+        require(statFromParent(destination) == null) { "目标存在同名文件或目录，不会覆盖或自动改名" }
+        var attempted = false
+        try {
+            // Bind the source again after the potentially paginated destination inspection.
+            require(sameSnapshot(meta, fileInfo(string(meta, "fsId"), false))) { "网盘源在重命名前变化，未执行" }
+            attempted = true
+            val response = json("POST", FILE_API, mapOf("method" to "filemanager", "opera" to "rename"),
+                mapOf("async" to "0", "ondup" to "fail", "filelist" to JsonArray().apply {
+                    add(JsonObject().apply { addProperty("path", source); addProperty("newname", name) })
+                }.toString()))
+            invalidate(source); invalidate(destination)
+            require(acknowledged(response, source)) { "百度未返回明确的逐项重命名回执" }
+            require(!asynchronous(response) || !bool(meta, "isDirectory")) { "百度返回了异步目录任务，尚未确认重命名完成" }
+            val listing = listDirectory(parent(source), { false })
+            require(listing.none { string(it, "path") == source }) { "原路径仍有项目，尚未确认重命名完成" }
+            val listed = listing.singleOrNull { string(it, "path") == destination }
+            require(listed != null && string(listed, "fsId") == string(meta, "fsId")) { "重命名目标路径或文件 ID 未确认" }
+            val renamed = fileInfo(string(meta, "fsId"), false)
+            require(string(renamed, "path") == destination && bool(renamed, "isDirectory") == bool(meta, "isDirectory") &&
+                integer(renamed, "bytes") == integer(meta, "bytes") && string(renamed, "md5") == string(meta, "md5")) {
+                "重命名后的文件身份、类型或内容摘要不一致"
+            }
+            // File mtime can be updated by a rename. With no digest, or for directories without
+            // a descendant inventory here, an mtime change requires the batch engine's full probe.
+            require((!bool(meta, "isDirectory") && string(meta, "md5").isNotEmpty()) ||
+                integer(renamed, "modifiedAt") == integer(meta, "modifiedAt")) { "目录或无摘要文件的修改时间发生变化，需要核对完整内容" }
+            return renamed.apply {
+                addProperty("originalPath", source); addProperty("state", "completed")
+                addProperty("verified", true); addProperty("renamed", true); addProperty("unchanged", false)
+            }
+        } catch (failure: Exception) {
+            if (!attempted) throw failure
+            // A timeout may follow a committed rename. Never replay the request or retain stale IDs.
+            invalidate(source); invalidate(destination)
+            throw IllegalStateException("百度尚未确认重命名结果；请核对原路径和目标路径，未自动重试")
+        }
+    }
     override fun delete(meta: JsonObject): JsonObject {
         val target = path(string(meta, "path"), true)
         require(sameSnapshot(meta, fileInfo(string(meta, "fsId"), false))) { "网盘源在清理前变化，未删除" }
@@ -285,17 +369,21 @@ internal class BaiduBinaryFileClient(
         catch (error: Exception) { return JsonObject().apply { addProperty("path", target); addProperty("deleted", false)
             addProperty("verified", false); addProperty("state", "unknown"); addProperty("error", "百度未确认清理结果，未重放删除，请核对云端") } }
         finally { invalidate(target) }
-        val info = response.get("info")?.takeIf { it.isJsonArray }?.asJsonArray
-        val receipt = info?.filter { it.isJsonObject && string(it.asJsonObject, "path") == target }?.singleOrNull()?.asJsonObject
-        val accepted = receipt != null && (receipt.get("errno") ?: receipt.get("error_code"))?.let { runCatching { it.asLong == 0L }.getOrDefault(false) } == true
-        val asynchronous = string(response, "taskid").let { it.isNotBlank() && it != "0" }
+        val accepted = acknowledged(response, target)
         // Never let a former positive ID stand in for post-delete path verification.
         val absent = try { statFromParent(target) == null } catch (error: Exception) { false }
-        val verified = accepted && absent && !(asynchronous && bool(meta, "isDirectory"))
+        val verified = accepted && absent && !(asynchronous(response) && bool(meta, "isDirectory"))
         return JsonObject().apply { addProperty("path", target); addProperty("fsId", string(meta, "fsId")); addProperty("deleted", verified)
             addProperty("verified", verified); addProperty("state", if (verified) "completed" else "unknown")
             if (!verified) addProperty("error", "百度尚未确认源文件清理完成，请核对云端，未自动重试") }
     }
+    private fun acknowledged(response: JsonObject, path: String): Boolean {
+        val info = response.get("info")?.takeIf { it.isJsonArray }?.asJsonArray
+        val receipt = info?.filter { it.isJsonObject && string(it.asJsonObject, "path") == path }?.singleOrNull()?.asJsonObject
+        val code = receipt?.let { it.get("errno") ?: it.get("error_code") } ?: return false
+        return runCatching { code.asBigDecimal.longValueExact() == 0L }.getOrDefault(false)
+    }
+    private fun asynchronous(response: JsonObject): Boolean = string(response, "taskid").let { it.isNotBlank() && it != "0" }
     private fun fileInfo(id: String, dlink: Boolean, cancelled: () -> Boolean = { false }): JsonObject {
         require(Regex("[0-9]{1,24}").matches(id) && id.any { it != '0' }) { "百度文件 ID 无效" }
         val response = json("GET", META_API, mapOf("method" to "filemetas", "fsids" to "[$id]", "dlink" to if (dlink) "1" else "0"), cancelled = cancelled)
@@ -330,10 +418,12 @@ internal class BaiduBinaryFileClient(
         if (method == "POST") builder.post(body ?: FormBody.Builder().apply { form.orEmpty().forEach { (key, value) -> add(key, value) } }.build()) else builder.get()
         try {
             transport.open(builder.build(), cancelled).use { response ->
+                checkCancelled(cancelled)
                 require(response.code in 200..299) { "百度网盘请求失败（HTTP ${response.code}），未自动重试" }
                 // A 1,000-row page can contain 2,048-byte paths; bound metadata independently of media.
                 val bytes = response.input.readBounded(8 * 1024 * 1024)
                 val value = try { JsonParser.parseString(bytes.toString(Charsets.UTF_8)).asJsonObject } catch (_: Exception) { error("百度响应格式无效，未自动重试") }
+                checkCancelled(cancelled)
                 val code = (value.get("errno") ?: value.get("error_code"))?.let { runCatching { it.asBigDecimal.longValueExact() }.getOrElse { error("百度错误码无效") } } ?: 0L
                 if (code != 0L) throw BinaryProviderException(code)
                 return value
@@ -341,6 +431,22 @@ internal class BaiduBinaryFileClient(
         } catch (failure: IOException) {
             checkCancelled(cancelled)
             throw IOException("百度网络请求中断，未自动重试；请核对任务及云端状态")
+        }
+    }
+    private fun openDownload(raw: String, cancelled: () -> Boolean, range: String? = null): BinaryReply {
+        var link = downloadUrl(raw)
+        var redirects = 0
+        while (true) {
+            checkCancelled(cancelled)
+            val request = Request.Builder().url(link).get().header("User-Agent", "pan.baidu.com")
+                .header("Accept-Encoding", "identity").apply { if (range != null) header("Range", range) }.build()
+            val response = transport.open(request, cancelled)
+            if (response.code !in setOf(301, 302, 303, 307, 308)) return response
+            val location = response.header("Location")
+            response.close()
+            require(++redirects <= 5 && !location.isNullOrEmpty()) { "百度下载重定向无效" }
+            val resolved = link.toHttpUrl().resolve(location) ?: error("百度下载重定向无效")
+            link = downloadUrl(resolved.toString())
         }
     }
     private fun downloadUrl(raw: String): String {
@@ -357,6 +463,7 @@ internal class BaiduBinaryFileClient(
         internal const val BLOCK_SIZE = 4 * 1024 * 1024
         private const val MAX_BLOCKS = 10_000
         internal const val IO_SIZE = 64 * 1024
+        internal const val MAX_PREVIEW_BYTES = 256 * 1024
         private const val FILE_API = "https://pan.baidu.com/rest/2.0/xpan/file"
         private const val META_API = "https://pan.baidu.com/rest/2.0/xpan/multimedia"
         private const val NAS_API = "https://pan.baidu.com/rest/2.0/xpan/nas"

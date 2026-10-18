@@ -58,7 +58,7 @@ def manifest_paths(value):
 
 def check_portable_source(relative, content):
     target = PurePosixPath(relative)
-    if target.suffix in ('.py', '.md', '.json', '.toml', '.html', '.yaml', '.command', '.kt', '.java', '.kts', '.xml') or target.name in ('.gitignore', 'LICENSE', 'NOTICE'):
+    if target.suffix in ('.py', '.md', '.json', '.toml', '.html', '.yaml', '.command', '.kt', '.java', '.kts', '.xml', '.cpp') or target.name in ('.gitignore', 'LICENSE', 'NOTICE', 'CMakeLists.txt'):
         private_component = rb'[^/\s"\']+/'
         if re.search(b'/' + b'Users' + b'/' + private_component, content) or re.search(b'/' + b'home' + b'/' + private_component, content):
             raise ValueError('A public source file contains a user-specific absolute path: ' + relative)

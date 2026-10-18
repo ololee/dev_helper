@@ -37,7 +37,7 @@ class NativeFileTransferService : Service() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "文件传输", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "本地与百度网盘传输进度，可随时取消"
+                description = "文件传输、重命名和删除的进度，可取消尚未处理的项目"
                 setShowBadge(false)
             }
         )
@@ -94,9 +94,12 @@ class NativeFileTransferService : Service() {
             "committing" -> "保存文件"
             "staging", "preparing", "reading-source" -> "读取文件"
             "creating-directories" -> "创建目录"
+            "renaming" -> "重命名文件"
+            "deleting" -> "删除文件"
             else -> "正在传输"
         }
-        val detail = if (job == null) "准备传输任务" else "$stage · ${size(transferred)} / ${size(total)}" + if (count > 1) " · $count 个任务" else ""
+        val mutation = job?.string("operation") in setOf("rename", "trash")
+        val detail = if (job == null) "准备文件任务" else if (mutation) "$stage · 已确认 ${progress?.number("completedItems") ?: 0} 项" else "$stage · ${size(transferred)} / ${size(total)}" + if (count > 1) " · $count 个任务" else ""
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("本地与网盘")
@@ -106,7 +109,7 @@ class NativeFileTransferService : Service() {
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setProgress(100, if (total > 0L) (transferred.coerceAtMost(total).toDouble() * 100 / total).toInt().coerceAtMost(99) else 0, total <= 0)
-            .addAction(Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "取消传输", cancel).build())
+            .addAction(Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "取消任务", cancel).build())
             .build()
     }
 

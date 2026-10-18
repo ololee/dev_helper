@@ -82,6 +82,7 @@ internal data class NativeFilePane(
     val items: List<JsonObject> = emptyList(), val selected: Set<String> = emptySet(), val loading: Boolean = false,
     val hasMore: Boolean = false, val error: String = ""
 )
+internal data class NativeFileRenameDraft(val scope: String, val items: List<JsonObject>, val name: String)
 
 /** Runtime owns transfer work; rotation and leaving this screen do not cancel a job. */
 internal class NativeFileManagerViewModel(application: Application) : AndroidViewModel(application) {
@@ -99,6 +100,10 @@ internal class NativeFileManagerViewModel(application: Application) : AndroidVie
     var planning by mutableStateOf(false); private set
     var notice by mutableStateOf(""); private set
     var configured by mutableStateOf(false); private set
+    var renameDraft by mutableStateOf<NativeFileRenameDraft?>(null); private set
+    var previewItems by mutableStateOf<List<JsonObject>>(emptyList()); private set
+    var previewScope by mutableStateOf("local"); private set
+    var previewIndex by mutableStateOf(0); private set
     private var cloudRoot = ""
     private var planClipboard: NativeFileClipboard? = null
     private val generations = mutableMapOf("local" to 0, "netdisk" to 0)
@@ -158,7 +163,7 @@ internal class NativeFileManagerViewModel(application: Application) : AndroidVie
                 val offset = if (more) before.items.size else 0
                 val result = withContext(Dispatchers.IO) {
                     if (scope == "local") transfer.localFiles(JsonObject().apply { if (directory.isNotBlank()) addProperty("pathUri", directory); addProperty("offset", offset); addProperty("limit", 100) })
-                    else netdisk.files(JsonObject().apply { addProperty("path", directory); addProperty("offset", offset); addProperty("limit", 100) })
+                    else transfer.cloudFiles(JsonObject().apply { addProperty("path", directory); addProperty("offset", offset); addProperty("limit", 100) })
                 }
                 if (generations[scope] != generation) return@launch
                 val current = if (scope == "local") result.string("pathUri", directory) else directory
@@ -188,6 +193,38 @@ internal class NativeFileManagerViewModel(application: Application) : AndroidVie
     }
     fun selectAll() { val value = pane(activeScope); replace(value.copy(selected = value.items.take(100).map { fileKey(activeScope, it) }.toSet())); if (value.items.size > 100) notice = "已选择前 100 项" }
     fun clearSelection() { replace(pane(activeScope).copy(selected = emptySet())) }
+    fun selectedItems(scope: String = activeScope) = pane(scope).let { value -> value.items.filter { fileKey(scope, it) in value.selected } }
+    fun showRename(scope: String = activeScope, files: List<JsonObject> = selectedItems(scope)) {
+        if (files.isEmpty()) return
+        notice = ""; renameDraft = NativeFileRenameDraft(scope, files.map { it.deepCopy() }, if (files.size == 1) files.single().string("name") else "{name}_{index}{ext}")
+    }
+    fun renameText(value: String) { renameDraft = renameDraft?.copy(name = value) }
+    fun closeRename() { if (!planning) renameDraft = null }
+    fun planRename() { renameDraft?.let { mutation(it.scope, "rename", it.items, it.name) } }
+    fun mutation(scope: String, operation: String, files: List<JsonObject>, name: String? = null) {
+        if (planning || pendingPlan != null || files.isEmpty()) return
+        planning = true; notice = ""; activate(scope)
+        viewModelScope.launch {
+            try {
+                val request = JsonObject().apply {
+                    addProperty("scope", scope); addProperty("operation", operation)
+                    if (name != null) addProperty("name", name)
+                    add("items", JsonArray().apply { files.forEach { original -> add(JsonObject().apply {
+                        if (scope == "local") addProperty("uri", original.string("uri")) else { addProperty("path", original.string("path")); if (original.has("fsId")) add("fsId", original.get("fsId")) }
+                    }) } })
+                }
+                pendingPlan = withContext(Dispatchers.IO) { transfer.plan(request) }; planClipboard = null; renameDraft = null
+            } catch (failure: Exception) { notice = failure.message ?: "无法建立文件操作计划" }
+            finally { planning = false }
+        }
+    }
+    fun preview(scope: String = activeScope, files: List<JsonObject> = selectedItems(scope)) {
+        val selected = files.filterNot { it.boolean("isDirectory") }.map { it.deepCopy() }
+        if (selected.isEmpty()) { notice = "请先选择要预览的文件"; return }
+        activate(scope); previewScope = scope; previewIndex = 0; previewItems = selected
+    }
+    fun previewAt(index: Int) { previewIndex = index.coerceIn(0, (previewItems.size - 1).coerceAtLeast(0)) }
+    fun closePreview() { previewItems = emptyList(); previewIndex = 0 }
     fun clipboard(operation: String) {
         val value = pane(activeScope); val files = value.items.filter { fileKey(activeScope, it) in value.selected }
         if (files.isNotEmpty()) { NativeFileClipboardState.value = NativeFileClipboard(UUID.randomUUID().toString(), activeScope, operation, files.map { it.deepCopy() }); notice = "已${if (operation == "move") "剪切" else "复制"} ${files.size} 项，请在另一端目录粘贴" }
@@ -220,22 +257,22 @@ internal class NativeFileManagerViewModel(application: Application) : AndroidVie
     }
     fun closePlan() { if (!planning) { pendingPlan = null; planClipboard = null } }
     fun executePlan() {
-        val plan = pendingPlan ?: return; val clipboard = planClipboard ?: return
+        val plan = pendingPlan ?: return; val clipboard = planClipboard
         if (planning) return
         planning = true
         viewModelScope.launch {
             try {
                 val job = withContext(Dispatchers.IO) { transfer.execute(JsonObject().apply { addProperty("planId", plan.string("planId")); addProperty("planDigest", plan.string("planDigest")) }) }
-                NativeFileClipboardState.jobClipboards[job.string("jobId", job.string("id"))] = clipboard.id
+                if (clipboard != null) NativeFileClipboardState.jobClipboards[job.string("jobId", job.string("id"))] = clipboard.id
                 jobs = listOf(job) + jobs.filterNot { it.string("jobId", it.string("id")) == job.string("jobId", job.string("id")) }
-                pendingPlan = null; planClipboard = null; notice = "已加入后台传输，可离开此页"
-            } catch (failure: Exception) { notice = failure.message ?: "传输未启动" }
+                pendingPlan = null; planClipboard = null; notice = "已加入后台任务，可离开此页"
+            } catch (failure: Exception) { notice = failure.message ?: "文件操作未启动" }
             finally { planning = false }
         }
     }
     fun cancel(job: JsonObject) {
         viewModelScope.launch {
-            try { val updated = withContext(Dispatchers.IO) { transfer.cancel(job.string("jobId", job.string("id"))) }; jobs = jobs.map { if (it.string("jobId", it.string("id")) == updated.string("jobId", updated.string("id"))) updated else it }; notice = "已请求取消；已写入的目标文件会在结果中列出" }
+            try { val updated = withContext(Dispatchers.IO) { transfer.cancel(job.string("jobId", job.string("id"))) }; jobs = jobs.map { if (it.string("jobId", it.string("id")) == updated.string("jobId", updated.string("id"))) updated else it }; notice = if (job.string("operation") in setOf("rename", "trash")) "已请求取消；当前单项操作需等待回执，请查看逐项结果" else "已请求取消；已写入的目标文件会在结果中列出" }
             catch (failure: Exception) { notice = failure.message ?: "取消请求未完成" }
         }
     }
@@ -267,7 +304,7 @@ class NativeFileManagerActivity : ComponentActivity() {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     NativeTextButton(onClick = { finish() }) { Text("返回") }
                     Text("本地与网盘", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    NativeTextButton(onClick = { showJobs = true }) { Text("传输${model.jobs.count { !NativeFileTransferPresentation.terminal(it) }.let { if (it > 0) " $it" else "" }}") }
+                    NativeTextButton(onClick = { showJobs = true }) { Text("任务${model.jobs.count { !NativeFileTransferPresentation.terminal(it) }.let { if (it > 0) " $it" else "" }}") }
                     NativeOverflow("文件管理", listOf(
                         NativeMenuAction(if (model.dual) "切换单栏" else "切换双栏") { model.toggleDual() },
                         NativeMenuAction("选择手机文件夹") { folderPicker.launch(null) },
@@ -282,6 +319,9 @@ class NativeFileManagerActivity : ComponentActivity() {
                     NativeTextButton(onClick = { model.clipboard("copy") }, enabled = active.selected.isNotEmpty()) { Text("复制") }
                     NativeTextButton(onClick = { model.clipboard("move") }, enabled = active.selected.isNotEmpty()) { Text("剪切") }
                     NativeTextButton(onClick = { model.paste(model.activeScope) }, enabled = clipboard != null && clipboard.scope != model.activeScope && active.directory.isNotBlank() && !model.planning) { Text("粘贴") }
+                    NativeTextButton(onClick = { model.preview() }, enabled = model.selectedItems().any { !it.boolean("isDirectory") }) { Text("预览所选") }
+                    NativeTextButton(onClick = { model.showRename() }, enabled = active.selected.isNotEmpty() && !model.planning) { Text("重命名") }
+                    NativeTextButton(onClick = { model.mutation(model.activeScope, "trash", model.selectedItems()) }, enabled = active.selected.isNotEmpty() && !model.planning) { Text("删除", color = MaterialTheme.colorScheme.error) }
                     NativeTextButton(onClick = model::selectAll, enabled = active.items.isNotEmpty()) { Text("全选") }
                     if (active.selected.isNotEmpty()) NativeTextButton(onClick = model::clearSelection) { Text("取消选择") }
                     NativeOverflow("拖拽方式", listOf(NativeMenuAction("拖拽时复制") { model.dragMode("copy") }, NativeMenuAction("拖拽时移动") { model.dragMode("move") }), buttonLabel = if (model.dragOperation == "copy") "拖拽：复制" else "拖拽：移动")
@@ -306,28 +346,46 @@ class NativeFileManagerActivity : ComponentActivity() {
                 }
             }
         }
-        model.pendingPlan?.let { plan -> AlertDialog(onDismissRequest = model::closePlan, title = { Text(if (plan.string("operation") == "move") "移动这些项目？" else "复制这些项目？") }, text = {
+        model.renameDraft?.let { draft -> AlertDialog(onDismissRequest = model::closeRename, title = { Text(if (draft.items.size == 1) "重命名" else "批量重命名 ${draft.items.size} 项") }, text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("${if (plan.string("sourceScope") == "local") "手机 → 百度网盘" else "百度网盘 → 手机"}", style = MaterialTheme.typography.titleMedium)
+                OutlinedTextField(draft.name, model::renameText, label = { Text(if (draft.items.size == 1) "新名称" else "名称模板") }, modifier = Modifier.fillMaxWidth(), singleLine = true, enabled = !model.planning)
+                if (draft.items.size > 1) Text("{name} 和 {stem} 为去扩展名的名称，{ext} 为含点的扩展名，{index} 从 1 起。例如 {name}_{index}{ext}。下一步检查实际名称后再执行。", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
+                else Text("扩展名也是名称的一部分，请保留需要的文件格式。", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
+                if (model.notice.isNotBlank()) Text(model.notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                if (model.planning) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        }, confirmButton = { NativeButton(onClick = model::planRename, enabled = !model.planning && draft.name.isNotBlank()) { Text("预览名称") } }, dismissButton = { NativeTextButton(onClick = model::closeRename, enabled = !model.planning) { Text("取消") } }) }
+        model.pendingPlan?.let { plan -> AlertDialog(onDismissRequest = model::closePlan, title = { Text("${NativeFileTransferPresentation.operationName(plan.string("operation"))}这些项目？") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val operation = plan.string("operation")
+                val mutation = operation in setOf("rename", "trash")
+                val scope = plan.string("sourceScope", plan.string("scope"))
+                Text(if (mutation) if (scope == "local") "手机文件" else "百度网盘" else if (scope == "local") "手机 → 百度网盘" else "百度网盘 → 手机", style = MaterialTheme.typography.titleMedium)
                 val targetName = plan.string("destinationName").ifBlank { "所选文件夹" }
-                Text("目标：$targetName", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                Text("共 ${plan.long("fileCount")} 个文件 · ${NativeFileTransferPresentation.bytes(if (plan.has("bytes")) plan.long("bytes") else plan.long("totalBytes"))}")
+                if (!mutation) Text("目标：$targetName", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Text(if (mutation) "共 ${plan.getAsJsonArray("items")?.size() ?: 0} 项" else "共 ${plan.long("fileCount")} 个文件 · ${NativeFileTransferPresentation.bytes(if (plan.has("bytes")) plan.long("bytes") else plan.long("totalBytes"))}")
                 LazyColumn(Modifier.heightIn(max = 180.dp)) { items(plan.getAsJsonArray("items").rows()) { item ->
-                    val name = item.string("name", "文件")
+                    val name = item.string("sourceName", item.string("name", "文件"))
                     Column(Modifier.padding(vertical = 3.dp)) {
                         Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("存入 $targetName/$name", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (operation == "rename") Text("改为 ${item.string("targetName", item.string("destinationName", "请检查目标名称"))}", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Accent, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        else if (!mutation) Text("存入 $targetName/$name", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 } }
-                if (plan.string("operation") == "move") Text("整批传输并校验成功后才处理源文件。失败或取消的未完成项目保留源文件，同名目标不会覆盖。", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
-                else Text("保留目录结构，同名目标不会覆盖。", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
+                Text(when (operation) {
+                    "trash" -> if (scope == "local") "手机文件将从原目录永久删除，文件夹内的内容也会删除。此操作无法在 DevHelper 中撤销，请确认已保留需要的备份。" else "网盘文件及文件夹内容将删除，回收与恢复按百度网盘的平台规则处理。请确认已保留需要的备份。"
+                    "rename" -> "按以上实际名称执行；同名目标不会覆盖。可确认的同级 .meta 会一起处理，部分完成会逐项显示。"
+                    "move" -> "整批传输并校验成功后才处理源文件。失败或取消的未完成项目保留源文件，同名目标不会覆盖。"
+                    else -> "保留目录结构，同名目标不会覆盖。"
+                }, style = MaterialTheme.typography.bodySmall, color = if (operation == "trash") MaterialTheme.colorScheme.error else NativeDesignTokens.Muted)
             }
-        }, confirmButton = { NativeButton(onClick = model::executePlan, enabled = !model.planning) { Text("开始${if (plan.string("operation") == "move") "移动" else "复制"}") } }, dismissButton = { NativeTextButton(onClick = model::closePlan, enabled = !model.planning) { Text("取消") } }) }
+        }, confirmButton = { NativeButton(onClick = model::executePlan, enabled = !model.planning) { Text("确认${NativeFileTransferPresentation.operationName(plan.string("operation"))}") } }, dismissButton = { NativeTextButton(onClick = model::closePlan, enabled = !model.planning) { Text("取消") } }) }
         if (showRoots) AlertDialog(onDismissRequest = { showRoots = false }, title = { Text("手机文件夹") }, text = { Column {
             model.roots.forEach { root -> NativeTextButton(onClick = { showRoots = false; model.activate("local"); model.load("local", root.string("uri")) }, enabled = root.boolean("readable")) { Text(root.string("name", "手机文件")) } }
             NativeTextButton(onClick = { showRoots = false; folderPicker.launch(null) }) { Text("选择其他文件夹…") }
         } }, confirmButton = { NativeTextButton(onClick = { showRoots = false }) { Text("关闭") } })
         if (showJobs) TransferJobs { showJobs = false }
+        if (model.previewItems.isNotEmpty()) NativeFilePreview(model.previewScope, model.previewItems, model.previewIndex, model::previewAt, model::closePreview)
     }
     @Composable private fun FilePane(pane: NativeFilePane, modifier: Modifier) {
         Column(modifier.background(NativeDesignTokens.Surface)) {
@@ -350,7 +408,13 @@ class NativeFileManagerActivity : ComponentActivity() {
                 if (pane.items.isEmpty() && !pane.loading && pane.error.isBlank()) item { Text("此文件夹为空，可将另一端的文件粘贴或拖到上方目录栏。", Modifier.padding(16.dp), color = NativeDesignTokens.Muted, style = MaterialTheme.typography.bodySmall) }
                 items(pane.items, key = { fileKey(pane.scope, it) }) { file -> NativeFileRow(file, pane.selected.contains(fileKey(pane.scope, file)),
                     toggle = { model.toggle(pane.scope, file) },
-                    open = { if (file.boolean("isDirectory") && pane.selected.isEmpty()) { model.activate(pane.scope); model.load(pane.scope, fileKey(pane.scope, file)) } else model.toggle(pane.scope, file) },
+                    open = { if (pane.selected.isNotEmpty()) model.toggle(pane.scope, file) else if (file.boolean("isDirectory")) { model.activate(pane.scope); model.load(pane.scope, fileKey(pane.scope, file)) } else model.preview(pane.scope, listOf(file)) },
+                    menu = { action -> when (action) {
+                        "rename" -> model.showRename(pane.scope, listOf(file))
+                        "trash" -> model.mutation(pane.scope, "trash", listOf(file))
+                        "preview" -> model.preview(pane.scope, listOf(file))
+                        "select" -> model.toggle(pane.scope, file)
+                    } },
                     drag = { model.drag(pane.scope, file) },
                     canDrop = { it.scope != pane.scope && file.boolean("isDirectory") },
                     drop = { model.paste(pane.scope, fileKey(pane.scope, file), it) }) }
@@ -367,7 +431,7 @@ class NativeFileManagerActivity : ComponentActivity() {
                 }
                 LinearProgressIndicator(progress = { NativeFileTransferPresentation.progress(job) }, modifier = Modifier.fillMaxWidth())
                 val progress = job.getAsJsonObject("progress") ?: JsonObject()
-                Text("${NativeFileTransferPresentation.bytes(progress.long("bytesTransferred"))} / ${NativeFileTransferPresentation.bytes(progress.long("totalBytes"))} · ${progress.long("completedFiles")}/${progress.long("fileCount")} 个文件", style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
+                Text(NativeFileTransferPresentation.progressSummary(job), style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
                 if (progress.string("currentFile").isNotBlank()) Text(progress.string("currentFile").substringAfterLast('/'), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -375,8 +439,8 @@ class NativeFileManagerActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable private fun TransferJobs(close: () -> Unit) {
         ModalBottomSheet(onDismissRequest = close, containerColor = NativeDesignTokens.Surface) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) { Text("传输任务", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge); NativeTextButton(onClick = close) { Text("收起") } }
-            Text("收起或离开此页不会停止后台传输。", Modifier.padding(horizontal = 20.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) { Text("文件任务", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge); NativeTextButton(onClick = close) { Text("收起") } }
+            Text("收起或离开此页不会停止后台任务。", Modifier.padding(horizontal = 20.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(20.dp)) {
                 if (model.jobs.isEmpty()) item { Text("还没有传输任务。在手机与网盘之间复制、粘贴或长按拖动文件即可开始。", style = MaterialTheme.typography.bodyMedium) }
                 items(model.jobs.take(50), key = { it.string("jobId", it.string("id")) }) { job ->
@@ -384,14 +448,14 @@ class NativeFileManagerActivity : ComponentActivity() {
                     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text("${if (job.string("sourceScope") == "local") "手机 → 百度网盘" else "百度网盘 → 手机"} · ${if (job.string("operation") == "move") "移动" else "复制"}", style = MaterialTheme.typography.titleSmall)
+                                Text(NativeFileTransferPresentation.jobTitle(job), style = MaterialTheme.typography.titleSmall)
                                 Text(NativeFileTransferPresentation.stage(job), style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
                             }
                             if (!NativeFileTransferPresentation.terminal(job) && job.boolean("cancelSupported")) NativeTextButton(onClick = { model.cancel(job) }, enabled = !job.boolean("cancelRequested")) { Text(if (job.boolean("cancelRequested")) "取消中" else "取消") }
                         }
                         LinearProgressIndicator(progress = { NativeFileTransferPresentation.progress(job) }, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
                         val progress = job.getAsJsonObject("progress") ?: JsonObject()
-                        Text("${NativeFileTransferPresentation.bytes(progress.long("bytesTransferred"))} / ${NativeFileTransferPresentation.bytes(progress.long("totalBytes"))} · ${progress.long("completedFiles")}/${progress.long("fileCount")} 个文件", style = MaterialTheme.typography.bodySmall)
+                        Text(NativeFileTransferPresentation.progressSummary(job), style = MaterialTheme.typography.bodySmall)
                         progress.string("currentFile").takeIf { it.isNotBlank() }?.let { Text(it.substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted) }
                         job.string("error").takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                         val result = job.getAsJsonObject("result") ?: job
@@ -399,18 +463,7 @@ class NativeFileManagerActivity : ComponentActivity() {
                         if (results.isNotEmpty()) NativeTextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起项目结果" else "查看 ${results.size} 项结果") }
                         if (expanded) results.forEach { item ->
                             Text(item.string("name", item.string("source").substringAfterLast('/')), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                            val status = when {
-                                item.string("sourceCleanupState") == "completed" && item.boolean("targetVerified") -> "已移动，源文件处理完成"
-                                item.string("sourceCleanupState") == "unknown" -> "目标已保存，源文件状态待确认"
-                                item.string("sourceCleanupState") == "partial" -> "目标已保存，部分源文件未能处理"
-                                item.boolean("targetVerified") && item.string("transferState") == "completed" -> if (job.string("operation") == "move") "目标已校验；源文件尚未处理完成" else "已复制并校验"
-                                item.boolean("destinationCommitted") -> "目标已写入，校验尚未完成"
-                                item.string("state") == "cancelled" -> "已取消"
-                                item.string("state") == "failed" -> "未完成"
-                                item.string("state") == "running" -> "正在处理"
-                                item.string("state") == "completed-with-errors" -> "部分操作未完成，请查看详细原因"
-                                else -> "等待处理"
-                            }
+                            val status = NativeFileTransferPresentation.itemStatus(job, item)
                             Text(status + item.string("error").takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty(), Modifier.padding(bottom = 6.dp), style = MaterialTheme.typography.bodySmall, color = NativeDesignTokens.Muted)
                         }
                     }
@@ -448,6 +501,7 @@ private class NativeFileRowView(context: android.content.Context) : LinearLayout
     val title = TextView(context)
     val metadata = TextView(context)
     val selected = CheckBox(context)
+    val more = TextView(context)
     init {
         orientation = HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
         setPadding(12.dpPixels(context), 2.dpPixels(context), 6.dpPixels(context), 2.dpPixels(context))
@@ -459,11 +513,13 @@ private class NativeFileRowView(context: android.content.Context) : LinearLayout
         metadata.textSize = 11f; metadata.setTextColor(0xFF637087.toInt()); metadata.maxLines = 1; metadata.ellipsize = android.text.TextUtils.TruncateAt.END
         labels.addView(title); labels.addView(metadata); addView(labels, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
         selected.buttonTintList = android.content.res.ColorStateList.valueOf(0xFF365EEA.toInt()); addView(selected, LayoutParams(48.dpPixels(context), 48.dpPixels(context)))
+        more.text = "⋮"; more.textSize = 22f; more.gravity = android.view.Gravity.CENTER; more.setTextColor(0xFF637087.toInt()); more.isClickable = true
+        addView(more, LayoutParams(40.dpPixels(context), 48.dpPixels(context)))
     }
 }
 
 @Composable
-private fun NativeFileRow(file: JsonObject, selected: Boolean, toggle: () -> Unit, open: () -> Unit, drag: () -> NativeFileClipboard,
+private fun NativeFileRow(file: JsonObject, selected: Boolean, toggle: () -> Unit, open: () -> Unit, menu: (String) -> Unit, drag: () -> NativeFileClipboard,
     canDrop: (NativeFileClipboard) -> Boolean, drop: (NativeFileClipboard) -> Unit) {
     AndroidView(modifier = Modifier.fillMaxWidth().height(58.dp), factory = { NativeFileRowView(it) }, update = { view ->
         val name = file.string("name", "文件")
@@ -475,6 +531,13 @@ private fun NativeFileRow(file: JsonObject, selected: Boolean, toggle: () -> Uni
         view.selected.setOnCheckedChangeListener(null); view.selected.isChecked = selected; view.selected.contentDescription = "选择 $name"
         view.selected.setOnCheckedChangeListener { _, checked -> if (checked != selected) toggle() }
         view.setOnClickListener { open() }
+        view.more.contentDescription = "$name 的更多操作"
+        view.more.setOnClickListener { anchor -> android.widget.PopupMenu(anchor.context, anchor).apply {
+            if (!file.boolean("isDirectory")) this.menu.add(0, 1, 0, "预览")
+            this.menu.add(0, 2, 1, "重命名"); this.menu.add(0, 3, 2, "删除"); this.menu.add(0, 4, 3, if (selected) "取消选择" else "选择")
+            setOnMenuItemClickListener { item -> menu(when (item.itemId) { 1 -> "preview"; 2 -> "rename"; 3 -> "trash"; else -> "select" }); true }
+            show()
+        } }
         view.setOnLongClickListener {
             view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             val clipboard = drag(); val envelope = NativeFileDrag(UUID.randomUUID().toString(), clipboard)
