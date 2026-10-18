@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <queries>
+        <package android:name="com.ss.android.ugc.aweme" />
+        <package android:name="com.ss.android.ugc.aweme.lite" />
+        <package android:name="com.tencent.mm" />
+    </queries>
+
+    <application
+        android:name=".DevHelperApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.DevHelper">
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.knowledge.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/knowledge_file_paths" />
+        </provider>
+        <service
+            android:name=".mcp.McpService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started local MCP server for interactive analysis of this rooted Android research device" />
+        </service>
+        <service android:name=".knowledge.AudioRecordingService" android:exported="false"
+            android:stopWithTask="false" android:foregroundServiceType="microphone" />
+        <service android:name=".netdisk.NativeFileTransferService" android:exported="false"
+            android:stopWithTask="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".relay.RelayService" android:exported="false" android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled outgoing HTTP relay connection for private device directory and explicitly requested file and tool transfers" />
+        </service>
+        <service
+            android:name=".sensor.SensorService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started local server that streams this device's motion sensors to a viewer on the same network" />
+        </service>
+        <activity android:name=".knowledge.KnowledgeActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="记忆与日程管理" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".knowledge.SpineActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="Spine 播放器" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".netdisk.BaiduNetdiskActivity" android:exported="false"
+            android:label="百度网盘" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".netdisk.NativeFileManagerActivity" android:exported="false"
+            android:label="本地与网盘" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".assets.ResourceLibraryActivity" android:exported="false"
+            android:label="游戏资源库" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".knowledge.MiniGameActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="小游戏管理" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".knowledge.NativeManagementActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="DevHelper 管理" android:theme="@style/Theme.DevHelper" />
+        <activity android:name=".mcp.ClipboardActivity" android:exported="false"
+            android:label="共享剪贴板" android:theme="@style/Theme.DevHelper" />
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.DevHelper">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

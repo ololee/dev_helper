@@ -12,7 +12,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'asset_ai.py', 'cloud_archive.py', 'catalog_snapshot.py', 'cloud_catalog.py', 'explorer_browse.py', 'explorer_files.py', 'file_operations.py', 'file_name_patterns.py', 'local_file_ops.py', 'netdisk_file_ops.py', 'cross_file_transfer.py', 'editor_assets.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'ASSET_AI.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
         'minigames.py', 'minigame_formats.py', 'assetripper.py', 'assetripper_cli/__init__.py', 'assetripper_cli/normalize_tuanjie.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
-        '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
+        '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/android_native_sources.py', 'ANDROID_NATIVE.md', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
 ASSETS = ('knowledge.html', 'notes.html', 'motion.js', 'motion.css', 'vendor/markdown-it.min.js', 'vendor/markdown-it.LICENSE',
           'vendor/markdown-it.provenance.json', 'vendor/README.md',
           'minigames/index.html', 'minigames/minigames-ui.js', 'minigames/minigames-ui.css',
@@ -32,6 +32,10 @@ def prepare(output: Path, skill_source: Path | None = None):
     if output == SOURCE or SOURCE in output.parents:
         raise ValueError('Choose an independent output directory outside the development source')
     files = {relative: SOURCE / relative for relative in CORE}
+    sys.path.insert(0, str(SOURCE / 'scripts'))
+    from android_native_sources import release_files
+    files.update(release_files(SOURCE))
+    files['android-native/README.md'] = SOURCE / 'ANDROID_NATIVE.md'
     files['static/index.html'] = SOURCE / 'static/index.html'
     files['static/resource-library.html'] = SOURCE / 'static/resource-library.html'
     for relative in ('resource-library.css','resource-library.js','vendor/tabulator/tabulator.min.js','vendor/tabulator/tabulator.min.css','vendor/tabulator/LICENSE','vendor/tabulator/PROVENANCE.json'):
