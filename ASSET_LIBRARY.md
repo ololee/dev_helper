@@ -2,6 +2,24 @@
 
 资源库只读取用户明确注册的工程目录，或恢复用户选择的百度网盘云索引，不执行工程脚本、不修改源文件。扫描结果、云端索引和原文件分开存储。扫描默认跳过生成目录及符号链接；解析限制、OCR可用性、跳过项都能通过 `asset_capabilities` 查询。
 
+## 文件浏览与预览
+
+资源库默认显示已登记或恢复的项目，双击项目或文件夹逐层进入。目录根据 SQLite 索引中的相对路径构建，云端索引也能浏览，无需先扫描源目录或下载原素材；文件夹的数量表示递归文件数。搜索框可搜索全工程内容，目录浏览和关键词／语义搜索保持分开。
+
+单击选中，双击或 Enter 打开，Ctrl／Cmd 切换选择，Shift 连选，Space 切换当前项，Esc 退出预览或清除选择。右键提供打开、下载、复制相对路径、属性，以及当前电脑支持的 Finder 定位／关联应用预览。后退、前进、返回上一级、路径面包屑和相对地址栏用于导航。不会提供没有实际实现的重命名、移动或删除操作。
+
+全屏预览提供图片、音频、视频、PDF 和文本。音视频采用浏览器原生播放控件；预览二进制接口支持 GET／HEAD 与单段 HTTP Range，可拖动进度且不将整段内容转换成 Base64。文本最多显示前 1 MiB，并标明截断；HTML、SVG 和脚本始终作为纯文本显示，不执行。浏览器不支持的媒体编码可下载或用本机关联应用预览。原有 `/content` 仍作为附件下载。
+
+云端未下载素材先显示「下载并打开」，用户明确选择后仅拉取这一项，校验完成才预览。Mac 本机页面可以在 Finder 定位原件；「在本机应用中预览」使用已校验 SHA256 的只读副本，保留原扩展名和原件。系统应用操作只接受真实回环客户端与本机同源 POST，不接受局域网、中转或任意路径参数；HTTP MCP 不提供系统应用启动工具。
+
+HTTP：
+
+- `POST /api/resource-library/browse {projectId?,path?,kind?,sort?,order?,limit?,offset?}`：只返回当前层文件夹和文件。MCP 为 `asset_browse`。
+- `GET/HEAD /api/resource-library/assets/{assetId}/preview`：内联预览，响应包含明确的 MIME 与 `nosniff`，不支持的格式返回错误。
+- `POST /api/resource-library/assets/{assetId}/open {}`：本机关联应用预览副本。
+- `POST /api/resource-library/assets/{assetId}/reveal {}`：本机 Finder 定位。
+- `GET/HEAD /api/netdisk/jobs/{jobId}/preview`：预览已经完成的单文件网盘下载，支持单段 Range，不触发新下载。
+
 ## 分类与存储方式
 
 本机资源目录使用标准 SQLite 数据库 `assets.sqlite3`，不是私有素材包格式。工程、文件指纹、路径、依赖标识和引用保存在独立表中；测量信息、用途判断、人工备注和 AI 分类以 JSON 字段保存。`annotations` 按人工／AI 来源分别记录，并绑定当时的文件 SHA256；文件变化后旧分类会标记失效。
