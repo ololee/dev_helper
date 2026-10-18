@@ -346,6 +346,10 @@ class AssetLibrary:
                 CREATE TABLE IF NOT EXISTS annotations(asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,source TEXT NOT NULL,data TEXT NOT NULL,updated REAL NOT NULL,PRIMARY KEY(asset_id,source));
                 CREATE TABLE IF NOT EXISTS embeddings(asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,model TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(asset_id,model));
                 CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings(model,dimensions);
+                CREATE TABLE IF NOT EXISTS remote_locations(asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,provider TEXT NOT NULL,fs_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(asset_id,provider,fs_id));
+                CREATE TABLE IF NOT EXISTS local_files(asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,sha256 TEXT NOT NULL,relative_path TEXT NOT NULL,size INTEGER NOT NULL,mtime_ns INTEGER NOT NULL,ctime_ns INTEGER NOT NULL,device INTEGER NOT NULL,inode INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS asset_storage(asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,remote_only INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS query_profiles(space TEXT PRIMARY KEY,base_url TEXT NOT NULL,model TEXT NOT NULL,dimensions INTEGER,input_version TEXT NOT NULL,mode TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,state TEXT NOT NULL,data TEXT NOT NULL,created REAL NOT NULL);
             ''')
             try:
@@ -434,7 +438,9 @@ class AssetLibrary:
         return [self.project(value, include_root) for value in identifiers]
 
     def start_scan(self, project_id, force=False):
-        self.project(project_id)
+        project = self.project(project_id)
+        if project['options'].get('remoteBacked'):
+            raise AssetLibraryError('Restored cloud catalogs do not need scanning; fetch originals as needed', 409)
         if not isinstance(force, bool) or self.closed:
             raise AssetLibraryError('Invalid scan request or library closed')
         with self.lock, self._db() as db:
@@ -564,6 +570,7 @@ class AssetLibrary:
         if old and old['sha256'] != item['sha256']:
             db.execute('DELETE FROM embeddings WHERE asset_id=?', (item['id'],))
             # User annotations are retained with the content hash they described.
+        db.execute('DELETE FROM asset_storage WHERE asset_id=?', (item['id'],))
         values = (item['id'], project_id, item['relative'], *item['stat'], item['sha256'], item['md5'], item['kind'], item['extension'], item['mime'], _json(item['metadata']), item['search'], VERSION, item['dhash'], item['color'])
         db.execute('INSERT INTO assets VALUES(' + ','.join('?' for _ in values) + ') ON CONFLICT(id) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,ctime_ns=excluded.ctime_ns,device=excluded.device,inode=excluded.inode,sha256=excluded.sha256,md5=excluded.md5,kind=excluded.kind,extension=excluded.extension,mime=excluded.mime,metadata=excluded.metadata,search_text=excluded.search_text,parser_version=excluded.parser_version,dhash=excluded.dhash,color=excluded.color', values)
         db.execute('DELETE FROM refs WHERE source_id=?', (item['id'],))
@@ -600,6 +607,7 @@ class AssetLibrary:
                 raise AssetLibraryError('Source project is unavailable', 409)
             with self._db() as db:
                 previous = {row['path']: row for row in db.execute('SELECT * FROM assets WHERE project_id=?', (project_id,))}
+                remote_only = {row[0] for row in db.execute('SELECT s.asset_id FROM asset_storage s JOIN assets a ON a.id=s.asset_id WHERE a.project_id=? AND s.remote_only=1', (project_id,))}
             pending_items, pending_bytes = [], 0
             def flush():
                 nonlocal pending_bytes
@@ -633,7 +641,7 @@ class AssetLibrary:
                     self._update_job(identifier, progress=dict(stats))
             flush()
             if not stats['walkErrors']:
-                stale = [row['id'] for path, row in previous.items() if path not in seen]
+                stale = [row['id'] for path, row in previous.items() if path not in seen and row['id'] not in remote_only]
                 with self.lock, self._db() as db:
                     if self.fts:
                         db.executemany('DELETE FROM asset_search WHERE id=?', [(value,) for value in stale])
@@ -685,6 +693,11 @@ class AssetLibrary:
             data = json.loads(item['data'])
             result['annotations'].append({**data, 'source': item['source'], 'updatedAt': item['updated'], 'stale': data.get('sha256') != row['sha256']})
         result['embeddings'] = [{'model': r['model'], 'dimensions': r['dimensions']} for r in db.execute('SELECT model,dimensions FROM embeddings WHERE asset_id=? AND sha256=?', (row['id'], row['sha256']))]
+        result['remoteLocations'] = self._remote_locations(db, row['id'], row['sha256'])
+        cached = db.execute('SELECT 1 FROM local_files WHERE asset_id=? AND sha256=?', (row['id'], row['sha256'])).fetchone()
+        options = json.loads(db.execute('SELECT options FROM projects WHERE id=?', (row['project_id'],)).fetchone()[0])
+        remote = db.execute('SELECT remote_only FROM asset_storage WHERE asset_id=?', (row['id'],)).fetchone()
+        result['availability'] = 'cached' if cached else 'remote' if options.get('remoteBacked') or remote and remote[0] else 'local'
         return result
 
     def asset(self, asset_id):
@@ -701,9 +714,14 @@ class AssetLibrary:
 
     def file_path(self, asset_id):
         with self._db() as db:
-            row = db.execute('SELECT a.*,p.root FROM assets a JOIN projects p ON p.id=a.project_id WHERE a.id=?', (_id(asset_id),)).fetchone()
+            row = db.execute('SELECT a.*,p.root,p.options FROM assets a JOIN projects p ON p.id=a.project_id WHERE a.id=?', (_id(asset_id),)).fetchone()
         if row is None:
             raise AssetLibraryError('Asset not found', 404)
+        cached = self._cached_file(row)
+        if cached:
+            return cached
+        if self.asset(asset_id)['availability'] == 'remote':
+            raise AssetLibraryError('Original is stored in cloud; fetch this asset first', 409)
         try:
             with _read_source(row['root'], row['path']) as handle:
                 if _signature(os.fstat(handle.fileno())) != (row['size'], row['mtime_ns'], row['ctime_ns'], row['device'], row['inode']):
@@ -719,7 +737,20 @@ class AssetLibrary:
     def open_file(self, asset_id):
         """Use this descriptor for streamed HTTP content to avoid a later symlink race."""
         item = self.asset(asset_id)
+        with self._db() as db:
+            row = db.execute('SELECT * FROM assets WHERE id=?', (asset_id,)).fetchone()
+        cached = self._cached_file(row)
+        if cached:
+            with _read_source(self.root, cached.relative_to(self.root).as_posix()) as handle:
+                with self._db() as db:
+                    saved = db.execute('SELECT * FROM local_files WHERE asset_id=? AND sha256=?', (asset_id, row['sha256'])).fetchone()
+                if saved is None or _signature(os.fstat(handle.fileno())) != tuple(saved[key] for key in ('size', 'mtime_ns', 'ctime_ns', 'device', 'inode')):
+                    raise AssetLibraryError('Cached original changed; fetch this asset again', 409)
+                yield handle
+            return
         project = self.project(item['projectId'], include_root=True)
+        if item['availability'] == 'remote':
+            raise AssetLibraryError('Original is stored in cloud; fetch this asset first', 409)
         with _read_source(project['root'], item['path']) as handle:
             info = os.fstat(handle.fileno())
             with self._db() as db:
@@ -727,6 +758,69 @@ class AssetLibrary:
             if _signature(info) != (row['size'], row['mtime_ns'], row['ctime_ns'], row['device'], row['inode']):
                 raise AssetLibraryError('Source changed; scan again', 409)
             yield handle
+
+    @staticmethod
+    def _remote_locations(db, asset_id, sha256):
+        return [{'assetId': row['asset_id'], 'provider': row['provider'], 'fsId': row['fs_id'], 'path': row['path'], 'sha256': row['sha256'], 'bytes': row['bytes']} for row in db.execute('SELECT * FROM remote_locations WHERE asset_id=? AND sha256=? ORDER BY provider,fs_id', (asset_id, sha256))]
+
+    def remote_locations(self, asset_id):
+        item = self.asset(asset_id)
+        with self._db() as db:
+            return self._remote_locations(db, item['id'], item['sha256'])
+
+    def query_profiles(self):
+        with self._db() as db:
+            return [{'space': row['space'], 'baseUrl': row['base_url'], 'model': row['model'], 'dimensions': row['dimensions'], 'inputVersion': row['input_version'], 'mode': row['mode']} for row in db.execute('SELECT * FROM query_profiles ORDER BY space')]
+
+    def _cached_file(self, asset_row):
+        with self._db() as db:
+            saved = db.execute('SELECT * FROM local_files WHERE asset_id=? AND sha256=?', (asset_row['id'], asset_row['sha256'])).fetchone()
+        if saved is None:
+            return None
+        try:
+            with _read_source(self.root, saved['relative_path']) as handle:
+                if _signature(os.fstat(handle.fileno())) != tuple(saved[key] for key in ('size', 'mtime_ns', 'ctime_ns', 'device', 'inode')):
+                    raise OSError('cache changed')
+            return self.root / saved['relative_path']
+        except (OSError, AssetLibraryError):
+            raise AssetLibraryError('Cached original changed; fetch this asset again', 409) from None
+
+    def cache_file(self, asset_id, source_path):
+        """Install one downloaded original after validating its exact declared content."""
+        item = self.asset(asset_id)
+        source_path = Path(source_path).absolute()
+        directory = self.root / 'files'
+        if directory.is_symlink():
+            raise AssetLibraryError('Unsafe original cache directory', 409)
+        directory.mkdir(exist_ok=True, mode=0o700)
+        destination = directory / item['sha256']
+        temporary = directory / ('.incoming-' + str(uuid.uuid4()))
+        try:
+            sha, count = hashlib.sha256(), 0
+            with _read_source(source_path.parent, source_path.name) as source, temporary.open('xb') as target:
+                os.chmod(temporary, 0o600)
+                for block in iter(lambda: source.read(1024 * 1024), b''):
+                    count += len(block)
+                    if count > item['bytes']:
+                        raise AssetLibraryError('Downloaded original size does not match catalog', 409)
+                    sha.update(block)
+                    target.write(block)
+                target.flush()
+                os.fsync(target.fileno())
+            if count != item['bytes'] or sha.hexdigest() != item['sha256']:
+                raise AssetLibraryError('Downloaded original hash does not match catalog', 409)
+            with self.lock, self._db() as db:
+                current = db.execute('SELECT sha256 FROM assets WHERE id=?', (asset_id,)).fetchone()
+                if current is None or current[0] != item['sha256']:
+                    raise AssetLibraryError('Asset changed during download', 409)
+                os.replace(temporary, destination)
+                info = destination.stat()
+                # Shared same-SHA cache paths receive the replacement file signature together.
+                db.execute('UPDATE local_files SET size=?,mtime_ns=?,ctime_ns=?,device=?,inode=? WHERE relative_path=?', (*_signature(info), destination.relative_to(self.root).as_posix()))
+                db.execute('INSERT OR REPLACE INTO local_files VALUES(?,?,?,?,?,?,?,?)', (asset_id, item['sha256'], destination.relative_to(self.root).as_posix(), *_signature(info)))
+        finally:
+            temporary.unlink(missing_ok=True)
+        return self.asset(asset_id)
 
     def dependencies(self, asset_id, direction='out', depth=1):
         item = self.asset(asset_id)

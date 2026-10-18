@@ -503,6 +503,15 @@ class AssetAIService:
             db.execute('INSERT INTO cache VALUES(?,?,?,?,?,?,?) ON CONFLICT(asset_id,kind,space) DO UPDATE SET sha256=excluded.sha256,input_hash=excluded.input_hash,output_hash=excluded.output_hash,updated=excluded.updated',
                        (item['id'], kind, space, item['sha256'], input_hash, output_hash, time.time()))
 
+    def _remember_embedding_profile(self, section, space):
+        """Retain the query recipe independently of temporary job history and keys."""
+        # Keep the configured dimensions, including None. Replacing None with
+        # a response's length would change the model-space identity at restore.
+        with self.library.lock, self.library._db() as db:
+            db.execute('INSERT INTO query_profiles(space,base_url,model,dimensions,input_version,mode) VALUES(?,?,?,?,?,?) '
+                       'ON CONFLICT(space) DO UPDATE SET base_url=excluded.base_url,model=excluded.model,dimensions=excluded.dimensions,input_version=excluded.input_version,mode=excluded.mode',
+                       (space, section['baseUrl'], section['model'], section.get('dimensions'), INPUT_VERSION, section.get('mode', 'chat')))
+
     def _classification_batch(self, section, batch, event):
         if section.get('mode') == 'responses-vision' and any(entry['item']['kind'] == 'image' for entry in batch):
             return self._vision_batch(section, batch, event)
@@ -708,6 +717,10 @@ class AssetAIService:
             for kind in kinds:
                 section = config['embedding' if kind == 'embed' else 'classification']
                 space = _space(section, 'embedding' if kind == 'embed' else 'classification')
+                if kind == 'embed':
+                    # Write before any vector can be committed, also backfilling
+                    # a recipe when every current vector is an incremental hit.
+                    self._remember_embedding_profile(section, space)
                 while True:
                     self._check(event)
                     with self._db() as db:

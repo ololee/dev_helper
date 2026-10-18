@@ -18,9 +18,11 @@ from PIL import Image
 try:
     from desktop.asset_ai import AssetAIService, AssetAIError, INPUT_VERSION, _space
     from desktop.asset_library import AssetLibrary
+    from desktop.catalog_snapshot import CatalogSnapshot
 except ImportError:
     from asset_ai import AssetAIService, AssetAIError, INPUT_VERSION, _space
     from asset_library import AssetLibrary
+    from catalog_snapshot import CatalogSnapshot
 
 
 class Protocol:
@@ -197,6 +199,60 @@ class AssetAITests(unittest.TestCase):
         result = self.wait(self.ai.start_job('embed', project_id=self.project['id']))
         self.assertEqual(result['progress']['succeeded'], 2)
         self.assertTrue(all(len(item['embeddings']) == 2 for item in self.assets()))
+
+    def test_embedding_query_profiles_survive_model_changes_and_deleted_job_history(self):
+        first = self.ai.status()['embedding']
+        result = self.wait(self.ai.start_job('embed', project_id=self.project['id']))
+        self.assertEqual(result['state'], 'completed', result)
+        self.ai.configure({'embedding': {'model': 'fixture-embedding-v2', 'dimensions': 3}})
+        second = self.ai.status()['embedding']
+        self.assertNotEqual(first['space'], second['space'])
+        result = self.wait(self.ai.start_job('embed', project_id=self.project['id']))
+        self.assertEqual(result['state'], 'completed', result)
+        # Profiles remain useful even after settings point at a third provider,
+        # and without the historical task records used by the migration fallback.
+        self.ai.configure({'embedding': {'baseUrl': 'https://another.fixture.test/v1', 'model': 'fixture-embedding-v3', 'apiKey': 'next-private-fixture-key'}})
+        with self.ai._db() as db:
+            db.execute('DELETE FROM items')
+            db.execute('DELETE FROM jobs')
+        self.assertEqual(self.ai.jobs(), [])
+        profiles = self.library.query_profiles()
+        self.assertEqual({p['space'] for p in profiles}, {first['space'], second['space']})
+        by_space = {p['space']: p for p in profiles}
+        self.assertIsNone(by_space[first['space']]['dimensions'])
+        self.assertEqual(by_space[second['space']]['dimensions'], 3)
+        for original in (first, second):
+            restored_section = by_space[original['space']]
+            self.assertEqual(_space(restored_section, 'embedding'), original['space'])
+        target = self.base / 'portable.sqlite3'
+        calls = len(self.protocol.calls)
+        exported = CatalogSnapshot(self.library).export(target)
+        self.assertEqual(exported['counts']['embeddings'], 4)
+        self.assertEqual(exported['queryProfiles'], profiles)
+        self.assertEqual(len(self.protocol.calls), calls)
+        for secret in ('private-fixture-key', 'next-private-fixture-key', 'private-classify-key'):
+            self.assertNotIn(secret.encode(), target.read_bytes())
+        with sqlite3.connect(target) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM query_profiles').fetchone()[0], 2)
+        recovered = AssetLibrary(self.base / 'recovered-catalog')
+        try:
+            summary = CatalogSnapshot(recovered).restore(target, expected_sha256=exported['sha256'])
+            self.assertEqual(summary['vectorsSkipped'], 0)
+            self.assertEqual(recovered.query_profiles(), profiles)
+            self.assertEqual(recovered.query_embedding([1, 0, 0], first['space'])['totalCandidates'], 2)
+        finally:
+            recovered.close()
+
+    def test_incremental_embedding_hit_backfills_profile_without_api_request(self):
+        result = self.wait(self.ai.start_job('embed', project_id=self.project['id']))
+        self.assertEqual(result['state'], 'completed', result)
+        with self.library._db() as db:
+            db.execute('DELETE FROM query_profiles')
+        calls = len(self.protocol.calls)
+        result = self.wait(self.ai.start_job('embed', project_id=self.project['id']))
+        self.assertEqual(result['progress']['skipped'], 2, result)
+        self.assertEqual(len(self.protocol.calls), calls)
+        self.assertEqual(self.library.query_profiles()[0]['space'], self.ai.status()['embedding']['space'])
 
     def test_metadata_change_reembeds_but_original_unchanged_skips(self):
         self.wait(self.ai.start_job('embed', project_id=self.project['id']))

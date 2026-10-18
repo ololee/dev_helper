@@ -1,6 +1,6 @@
 # 游戏资源库
 
-资源库只读取用户明确注册的工程目录，不执行工程脚本、不修改源文件。扫描结果与原文件分开存储。默认跳过生成目录及符号链接；解析限制、OCR可用性、跳过项都能通过 `asset_capabilities` 查询。
+资源库只读取用户明确注册的工程目录，或恢复用户选择的百度网盘云索引，不执行工程脚本、不修改源文件。扫描结果、云端索引和原文件分开存储。扫描默认跳过生成目录及符号链接；解析限制、OCR可用性、跳过项都能通过 `asset_capabilities` 查询。
 
 ## 分类与存储方式
 
@@ -45,15 +45,48 @@
 
 分类计划以预览时的元信息为准，未知或需复核项不会伪装成已由 AI 确认。批量任务逐项记录成功、失败和未执行，上传或清单失败不会误报整批完成。云端上传成功只表示已有云副本；下载完成后才有目标设备的本地副本。备份目录和平台权限以已配置应用为准。
 
-当前 SQLite 索引和向量仍保存在电脑本机。网盘的归档清单可读、可追溯，但它不是完整向量导出或跨设备索引恢复协议；手机搜索仍访问已配对且在线电脑的索引，不会直接在网盘运行向量检索。
+2.11.0 的新界面为分类归档设置 `syncCatalog:true`：原文件上传完成后，另排一个相关工程的云索引发布任务。`catalogSyncJobId` 与分类上传任务分别查询；文件上传完成不代表云索引已经完成。旧 API 调用省略 `syncCatalog` 时默认 `false`，不会给旧客户端增加隐式发布。独立发布与恢复见下节。
 
 HTTP 流程：
 
 1. `POST /api/resource-library/backup-plan {assetIds,remoteDirectory,layout:"classified"}`，读取预览和 `planDigest`。
-2. `POST /api/resource-library/backup {assetIds,remoteDirectory,layout:"classified",planDigest}`，明确启动上传。
+2. `POST /api/resource-library/backup {assetIds,remoteDirectory,layout:"classified",planDigest,syncCatalog:true}`，明确启动上传。
 3. `GET /api/resource-library/backups/{jobId}`，检查逐项状态与清单结果。
 
-MCP 对应 `asset_backup_plan`、`asset_backup_start`、`asset_backup_job`；`asset_backup_start` 的 `layout` 和 `planDigest` 为兼容旧调用而保留可选，分类归档需提交预览摘要。显式指定 `layout:"snapshot"` 可继续使用旧布局。
+MCP 对应 `asset_backup_plan`、`asset_backup_start`、`asset_backup_job`；`asset_backup_start` 的 `layout`、`planDigest` 和 `syncCatalog` 为兼容旧调用而保留可选，分类归档需提交预览摘要。显式指定 `layout:"snapshot"` 可继续使用旧布局。`syncCatalog` 只提交给启动接口，不属于归档预览参数。
+
+## 云索引、换机恢复与按需原素材
+
+在资源库右上角打开「云索引」，选择当前工程或全部工程发布版本。发布的是标准 SQLite 文件 `catalog.sqlite3`，其中有分类、人工／AI 备注、OCR、文件指纹、依赖标识、相似特征、现有 float32 向量和已确认的云端原文件位置；小型 `manifest.json` 记录版本、计数、文件 ID、大小及 SHA256。向量以二进制 BLOB 保存，不转换成 Base64 或巨大 JSON 数组。
+
+```text
+/apps/<应用目录名>/catalogs/<snapshotUUID>/catalog.sqlite3
+/apps/<应用目录名>/catalogs/<snapshotUUID>/manifest.json
+```
+
+可自选 `catalogs` 以外的索引父目录。每次发布新版本，不直接复制正在写入的 SQLite WAL，不覆盖其他设备的数据库。清单与原始素材归档的 JSON 清单用途不同：前者指向可恢复的完整索引，后者记录一次文件上传。版本列表仅下载小清单，不下载所有 SQLite 文件或原素材；当前每次检查至多 20 个版本，更多版本会报告 `hasMore`，可分目录管理。
+
+应用的模型 Key、百度授权 token、SecretKey、传输队列和旧电脑的工程根目录不写入便携索引。可包含不带凭据的向量模型地址、名称、维数和空间标识，便于换机后配置匹配的查询 API。资源的描述、备注与 OCR 属于用户索引内容，会随索引备份。
+
+换电脑时先授权同一百度网盘应用，打开「云索引」并选择版本恢复。恢复前检查 SQLite 格式、结构、大小、计数和 SHA256，再在本机事务中合并数据：不扫描原工程，不调用分类或向量生成 API，也不下载原素材。已有人工内容优先保留；内容不同的同名资源保留为独立版本并报告冲突，旧云向量与本机备注不一致时跳过旧向量并报告数量。不会把旧电脑的路径绑定为新电脑的源文件。
+
+恢复后可直接浏览、按关键词查询、查看依赖，以及用「已有向量查相似素材」比较已保存的向量；这些操作不调用模型。输入新的自然语言进行语义搜索时，仍需同一向量模型 API 生成查询向量，资料中的每条资源向量无需重算。无需下载原素材就可搜索索引。
+
+列表区分「云端未下载」「已下载缓存」「本机可用」。云端资源不会为了填满缩略图列表而自动下载全部原件；在详情点击「下载预览」或「下载原素材」后，只拉取该文件并校验 SHA256，再存入本机缓存供预览或保存。未上传或没有匹配回执的素材显示不可拉取，不把索引恢复成功当作原文件已有副本。
+
+当前单版本便携 SQLite 校验范围为 2 GiB、最多 100 万素材、向量最多 4096 维，超出时明确失败；这是单版本解析边界，不是素材总库容量配额。后台发布、恢复和拉取任务持久化记录真实状态，服务重启标记中断，不自动重复云端动作。
+
+HTTP：
+
+- `GET /api/resource-library/catalog/status`：本机工程、资源、向量与云原件覆盖计数。
+- `GET /api/resource-library/catalog/snapshots?remoteDirectory=catalogs`：可恢复版本与逐项失败原因。
+- `POST /api/resource-library/catalog/publish {projectIds?,remoteDirectory?}`：发布已有索引。
+- `POST /api/resource-library/catalog/restore {manifestFsId}`：恢复选中版本。
+- `POST /api/resource-library/catalog/fetch {assetId}`：仅下载所选原件。
+- `GET /api/resource-library/catalog/jobs`、`GET /api/resource-library/catalog/jobs/{jobId}`：任务、结果与冲突。
+- `POST /api/resource-library/similar {assetId,mode:"semantic",model}`：使用已保存向量查相似，不请求模型。
+
+电脑 HTTP MCP 对应 `asset_catalog_status/snapshots/publish/restore/fetch/jobs/job`；已排队不是已完成，应查询返回的 `jobId`。
 
 ## HTTP MCP
 
@@ -61,4 +94,8 @@ MCP 对应 `asset_backup_plan`、`asset_backup_start`、`asset_backup_job`；`as
 
 手机端使用Android原生页面配置应用、选择文件和管理传输；Mac端用资源库与网盘管理页。私有配置、token、索引、游戏资产与测试证明不随公共源码发布。
 
-手机原生“游戏资源库”可选择已配对的在线电脑，搜索其同一索引、查看分类和依赖及二进制缩略图；没有把电脑离线误报为手机已有本地全库。
+手机原生“游戏资源库”保留「已配对电脑」来源，也可切换「本机云资源库」：先在手机网盘页授权同一应用账号，再点「从网盘恢复」选择云索引。分类、依赖和已有向量恢复到手机本机 SQLite 后，关键词与已有向量相似搜索无需电脑在线；原素材仍在网盘，选中下载并校验后才有手机副本。手机不运行模型。新的自然语言语义查询需在手机「查询 API」为已恢复的相同向量空间单独填写 Key，密钥用 Android Keystore 加密保存，不从网盘或 Mac 自动带入。
+
+手机 `/mcp/assets` 提供 `asset_catalog_status`、`asset_catalogs`、`asset_catalog_restore {snapshotId}`、`asset_catalog_job`、`asset_similar` 和 `asset_fetch`；`asset_projects/search/get/dependencies` 指定 `source:"local-cloud"` 时访问手机本机索引，指定已配对电脑时继续走局域网优先连接。手机恢复 API 采用 `snapshotId`，电脑恢复采用 `manifestFsId`，应按各自工具 schema 调用。
+
+手机版选择云版本后会切换本机云索引版本，已有下载的原素材缓存保留；需要全部工程时选择完整索引版本。Mac 恢复采用合并方式。手机的本机云索引目前用于浏览与搜索，分类修改通过电脑或来源索引发布新版本。

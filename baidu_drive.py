@@ -381,6 +381,18 @@ class BaiduDriveService:
             raise BaiduDriveError('百度未返回有效的账号用户 ID，请检查当前账号授权', 502)
         return str(identifier)
 
+    def file_info(self, fs_id):
+        """Read a single scoped file receipt without exposing its download URL."""
+        if isinstance(fs_id,bool) or not isinstance(fs_id,(str,int)) or not re.fullmatch('[0-9]{1,24}',str(fs_id)) or int(fs_id)<=0:
+            raise BaiduDriveError('文件 ID 格式错误')
+        value=self._json('GET',META_API,query=dict(method='filemetas',fsids=json.dumps([int(fs_id)]),dlink=0),authenticated=True,retry=True)
+        items=value.get('list',[])
+        if not isinstance(items,list) or len(items)!=1 or not isinstance(items[0],dict) or str(items[0].get('fs_id'))!=str(fs_id):
+            raise BaiduDriveError('网盘未返回所选文件，请核对账号与文件',404)
+        item=items[0]
+        self.remote_path(item.get('path'),file=True)
+        return self._file(item)
+
     def mkdir(self, path):
         target = self.remote_path(path, file=True)
         result = self._json('POST', FILE_API, query=dict(method='create'),
