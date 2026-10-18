@@ -44,7 +44,7 @@ from resource_workspace import ResourceWorkspace, ScopedResourceMcp
 HERE = Path(__file__).resolve().parent
 DEVICE = {"type": "string", "enum": ["mac", "android"]}
 TRANSPORT_OPTION = {"enum": ["auto", "lan", "relay"]}
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 
 
 def tool_result(value):
@@ -571,6 +571,8 @@ class Desktop:
             return JSONResponse({"error": str(error)[:400]}, 400)
 
     async def local_api(self, request: Request, path):
+        if path.startswith('/api/knowledge/resource-library/'):
+            return await self.resources.api(request)
         if path.startswith("/spine/"):
             path = "/api/knowledge" + path
         if path.startswith("/api/workflows/"):
@@ -859,7 +861,12 @@ class Desktop:
                      headers=[(k.encode(), str(v).encode()) for k, v in headers.items()], scheme="http", server=("in-process", self.port), client=("relay", 0))
         request = Request(scope, receive)
         try:
-            response = await self.local_api(request, parsed.path)
+            if parsed.path.startswith('/api/knowledge/resource-library/'):
+                # Called only after the existing paired relay/LAN envelope checks.
+                # This alias exposes read-only asset content, never model settings.
+                response = await self.resources.api(request,trusted_relay=True)
+            else:
+                response = await self.local_api(request, parsed.path)
         finally:
             if download:
                 await download.aclose()
@@ -871,6 +878,15 @@ class Desktop:
                         yield chunk
             blob = await self.relay.upload_blob(chunks(), headers=response_headers, name=Path(response.path).name)
             return dict(status=response.status_code, headers=response_headers, blobId=blob["id"], blob=blob)
+        if isinstance(response, StreamingResponse):
+            try:
+                blob = await self.relay.upload_blob(response.body_iterator, headers=response_headers, name='resource')
+                return dict(status=response.status_code, headers=response_headers, blobId=blob['id'], blob=blob)
+            finally:
+                if hasattr(response.body_iterator,'aclose'):
+                    await response.body_iterator.aclose()
+                if response.background:
+                    await response.background()
         try:
             value = json.loads(response.body)
             value = transform_paths(value, "mac", reverse=True)
@@ -961,12 +977,23 @@ class Desktop:
             return HTMLResponse(render_minigames_ui('mac'))
         async def resource_library(request):
             return FileResponse(HERE / 'static/resource-library.html', media_type='text/html', headers={'Cache-Control': 'no-store'})
+        async def resource_static(request):
+            allowed={
+                'resource-library.css':'text/css',
+                'resource-library.js':'text/javascript',
+                'vendor/tabulator/tabulator.min.js':'text/javascript',
+                'vendor/tabulator/tabulator.min.css':'text/css',
+            }
+            name=request.path_params['path']
+            if name not in allowed:return Response(status_code=404)
+            return FileResponse(HERE/'static'/name,media_type=allowed[name],headers={'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'})
         return Starlette(lifespan=self.lifespan, routes=[
             Route("/", index),
             Route("/notes", notes),
             Route("/spine", spine),
             Route('/minigames', minigames),
             Route('/resource-library', resource_library),
+            Route('/static/{path:path}',resource_static,methods=['GET','HEAD']),
             Route('/mcp/assets', self.resource_mcps[0], methods=['GET', 'POST', 'DELETE']),
             Route('/mcp/netdisk', self.resource_mcps[1], methods=['GET', 'POST', 'DELETE']),
             Route("/spine/{path:path}", self.local_api_spine, methods=["GET", "HEAD", "POST", "DELETE"]),

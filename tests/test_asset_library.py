@@ -77,6 +77,39 @@ class AssetLibraryTests(unittest.TestCase):
             self.assertEqual(source.read(), image.read_bytes())
         self.assertEqual(original, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in original})
 
+    def test_description_changes_invalidate_only_generated_text_vectors(self):
+        self.image()
+        self.scan()
+        item = self.items()['ui/icon.png']
+        generated = 'asset-metadata-text-v1:fixture:space'
+        imported = 'external-image-model'
+        for model in (generated, imported):
+            self.library.import_embeddings(self.project['id'], model, [{'assetId': item['id'], 'vector': [1., 0.]}])
+        note = {'source': 'manual', 'purpose': '菜单按钮'}
+        result = self.library.save_annotation(item['id'], note)
+        self.assertEqual([v['model'] for v in result['embeddings']], [imported])
+        self.library.import_embeddings(self.project['id'], generated, [{'assetId': item['id'], 'vector': [1., 0.]}])
+        result = self.library.save_annotation(item['id'], note)
+        self.assertEqual({v['model'] for v in result['embeddings']}, {generated, imported})
+        result = self.library.save_annotation(item['id'], {**note, 'purpose': '场景标记'})
+        self.assertEqual([v['model'] for v in result['embeddings']], [imported])
+
+    def test_server_sort_and_semantic_kind_filter_apply_before_paging(self):
+        self.image('ui/z.png')
+        self.write('a.obj', 'v 0 0 0\n')
+        self.scan()
+        entries = self.items()
+        self.assertEqual(self.library.list_assets(sort='name', order='desc', limit=1)['items'][0]['path'], 'ui/z.png')
+        self.library.import_embeddings(self.project['id'], 'fixture-space', [
+            {'assetId': entries['ui/z.png']['id'], 'vector': [1., 0.]},
+            {'assetId': entries['a.obj']['id'], 'vector': [0.9, 0.1]},
+        ])
+        result = self.library.query_embedding([1., 0.], 'fixture-space', kind='model', limit=200)
+        self.assertEqual(result['totalCandidates'], 1)
+        self.assertEqual(result['items'][0]['path'], 'a.obj')
+        with self.assertRaises(AssetLibraryError):
+            self.library.list_assets(sort='path; DROP TABLE assets')
+
     def test_incremental_keeps_id_skips_hash_and_prunes_removed(self):
         self.image()
         self.write('to-remove.txt', 'old')

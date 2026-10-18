@@ -17,6 +17,7 @@ from PIL import Image
 from baidu_drive import BaiduDriveError
 from server import Desktop
 from starlette.testclient import TestClient
+import httpx
 
 
 class OfflineDrive:
@@ -415,6 +416,101 @@ class ResourceWorkspaceHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code,202,response.text)
         self.assertEqual(drive.uploads[1]['content'],raw)
         self.assert_staging_empty()
+
+    def test_external_ai_config_and_models_keep_keys_private(self):
+        ai=self.desktop.resources.ai
+        ai.client.close()
+        def provider(request):
+            self.assertTrue(request.url.path.endswith('/models'))
+            self.assertEqual(request.headers['Authorization'],'Bearer fixture-private-ai-key')
+            return httpx.Response(200,json={'data':[{'id':'fixture-embedding','owned_by':'fixture','providerSecret':'never-return'}]})
+        ai.client=httpx.Client(transport=httpx.MockTransport(provider))
+        response=self.client.post('/api/resource-library/ai/config',json={'embedding':{'baseUrl':'https://fixture.invalid/v1','apiKey':'fixture-private-ai-key'}})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertNotIn('fixture-private-ai-key',response.text)
+        self.assertTrue(response.json()['embedding']['hasApiKey'])
+        response=self.client.get('/api/resource-library/ai/models?kind=embedding')
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['items'][0]['id'],'fixture-embedding')
+        self.assertNotIn('providerSecret',response.text)
+        response=self.client.post('/api/resource-library/ai/config',json={'embedding':{'apiKey':''}})
+        self.assertTrue(response.json()['embedding']['hasApiKey'])
+        response=self.client.post('/api/resource-library/ai/config',json={'embedding':{'clearKey':True}})
+        self.assertFalse(response.json()['embedding']['hasApiKey'])
+
+    def test_batch_embedding_job_and_semantic_search_are_accessible_through_http_and_mcp(self):
+        assets=self.fixture_project();ai=self.desktop.resources.ai
+        ai.client.close()
+        def provider(request):
+            self.assertTrue(request.url.path.endswith('/embeddings'))
+            body=json.loads(request.read())
+            return httpx.Response(200,json={'data':[{'index':i,'embedding':[1.,.1,.2]} for i,_ in enumerate(body['input'])]})
+        ai.client=httpx.Client(transport=httpx.MockTransport(provider))
+        response=self.client.post('/api/resource-library/ai/config',json={'embedding':{'baseUrl':'https://fixture.invalid/v1','model':'fixture-model','apiKey':'fixture-api-key'}})
+        self.assertEqual(response.status_code,200,response.text)
+        response=self.client.post('/api/resource-library/ai/jobs',json={'kind':'embed','assetIds':[assets['texture.png']['id']]})
+        self.assertEqual(response.status_code,202,response.text)
+        identifier=response.json()['jobId'];deadline=time.monotonic()+8
+        while True:
+            job=self.client.get('/api/resource-library/ai/jobs/'+identifier).json()
+            if job['state'] not in ('queued','running'):break
+            self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+        self.assertEqual(job['state'],'completed',job)
+        self.assertEqual(job['progress']['succeeded'],1)
+        response=self.client.post('/api/resource-library/search',json={'mode':'semantic','query':'a red interface icon','kind':'image'})
+        self.assertEqual(response.status_code,200,response.text)
+        result=response.json()
+        self.assertEqual(result['items'][0]['id'],assets['texture.png']['id'])
+        self.assertIn('thumbnailUrl',result['items'][0])
+        self.assertEqual(result['queryGeneratedBy'],'external-api')
+        rpc=self.rpc('assets','tools/call',{'name':'asset_search','arguments':{'mode':'semantic','query':'a red interface icon','kind':'image'}})
+        self.assertFalse(rpc.get('isError'),rpc)
+        self.assertEqual(rpc['structuredContent']['items'][0]['id'],assets['texture.png']['id'])
+
+    def test_thumbnail_is_binary_bounded_and_alias_cannot_reach_model_configuration(self):
+        assets=self.fixture_project();item=assets['texture.png'];path='/api/resource-library/assets/'+item['id']+'/thumbnail'
+        response=self.client.get(path)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.headers['content-type'],'image/png')
+        self.assertEqual(hashlib.sha256(response.content).hexdigest(),response.headers['X-Content-SHA256'])
+        with Image.open(io.BytesIO(response.content)) as image:self.assertLessEqual(max(image.size),512)
+        head=self.client.head(path)
+        self.assertEqual(head.content,b'')
+        self.assertEqual(int(head.headers['content-length']),len(response.content))
+        self.assertEqual(self.client.get(path,headers={'If-None-Match':response.headers['etag']}).status_code,304)
+        alias='/api/knowledge/resource-library/assets/'+item['id']+'/thumbnail'
+        self.assertEqual(self.client.get(alias).content,response.content)
+        self.assertEqual(self.client.post('/api/knowledge/resource-library/ai/config',json={}).status_code,404)
+        (self.source/'texture.png').write_bytes(b'source-changed')
+        self.assertEqual(self.client.get(path).status_code,409)
+
+    def test_paired_relay_resource_alias_streams_bytes_without_base64(self):
+        item=self.fixture_project()['texture.png']
+        saved=[]
+        async def upload(content,**kwargs):
+            if isinstance(content,bytes):value=content
+            else:
+                chunks=[]
+                async for chunk in content:chunks.append(chunk)
+                value=b''.join(chunks)
+            saved.append(value)
+            return {'id':'fixture-binary-blob','bytes':len(value),'sha256':hashlib.sha256(value).hexdigest()}
+        path='/api/knowledge/resource-library/assets/'+item['id']+'/content'
+        with patch.object(self.desktop.relay,'upload_blob',side_effect=upload):
+            response=self.client.portal.call(self.desktop.relay_execute,{'method':'GET','path':path,'body':{},'headers':{}})
+        self.assertEqual(response['status'],200)
+        self.assertEqual(response['blobId'],'fixture-binary-blob')
+        self.assertEqual(saved,[self.image_bytes])
+        self.assertNotIn('body',response)
+
+    def test_model_settings_reject_foreign_origins_and_search_validates_schema(self):
+        response=self.client.post('/api/resource-library/ai/config',json={'embedding':{'apiKey':'never-save'}},headers={'Origin':'https://foreign.invalid'})
+        self.assertEqual(response.status_code,403)
+        self.assertFalse(self.desktop.resources.ai.status()['embedding']['hasApiKey'])
+        response=self.client.post('/api/resource-library/search',json={'mode':'invented','query':'x'})
+        self.assertEqual(response.status_code,400,response.text)
+        response=self.client.get('/static/../../data/resource-workspace/asset-ai/config.json')
+        self.assertEqual(response.status_code,404)
 
     def test_json_limit_is_explicit_and_foreign_origin_does_not_change_configuration(self):
         response=self.client.post('/api/netdisk/config',content=b' '*(4*1024*1024+1),headers={'Content-Type':'application/json'})

@@ -9,7 +9,7 @@ import shutil
 import sys
 
 SOURCE = Path(__file__).resolve().parents[1]
-CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
+CORE = ('server.py', 'control.py', 'clipboard.py', 'devices.py', 'knowledge.py', 'resource_batches.py', 'resource_workspace.py', 'baidu_drive.py', 'asset_library.py', 'asset_ai.py', 'BAIDU_DRIVE.md', 'ASSET_LIBRARY.md', 'ASSET_AI.md', 'apple_ocr.swift', 'media.py', 'audio.py', 'sync.py', 'spine.py',
         'minigames.py', 'minigame_formats.py', 'assetripper.py', 'assetripper_cli/__init__.py', 'assetripper_cli/normalize_tuanjie.py',
         'private_skills.py', 'web_assets.py', 'workflows.py', 'ai_support.py', 'notifications.py', 'relay_client.py', 'relay/__init__.py', 'relay/server.py', 'relay/PROTOCOL.md', 'relay/requirements.txt', 'scripts/deploy_relay.py', 'pyproject.toml', 'README.md', 'LICENSE', 'NOTICE',
         '.gitignore', '启动助手.command', '停止助手.command', 'scripts/publish.py', 'scripts/package_release.py', 'scripts/setup_asr.py', 'scripts/import_project.py', 'skills/devhelper-connect/SKILL.md')
@@ -34,6 +34,8 @@ def prepare(output: Path, skill_source: Path | None = None):
     files = {relative: SOURCE / relative for relative in CORE}
     files['static/index.html'] = SOURCE / 'static/index.html'
     files['static/resource-library.html'] = SOURCE / 'static/resource-library.html'
+    for relative in ('resource-library.css','resource-library.js','vendor/tabulator/tabulator.min.js','vendor/tabulator/tabulator.min.css','vendor/tabulator/LICENSE','vendor/tabulator/PROVENANCE.json'):
+        files['static/'+relative] = SOURCE / 'static' / relative
     files.update({str(path.relative_to(SOURCE)): path for path in (SOURCE / 'tests').glob('test_*.py')})
     sys.path.insert(0, str(SOURCE))
     from web_assets import asset_path
@@ -49,6 +51,13 @@ def prepare(output: Path, skill_source: Path | None = None):
         for name, digest in (('spine-webgl.js', 'runtimeSha256'), ('LICENSE', 'licenseSha256')):
             if hashlib.sha256(files[base + name].read_bytes()).hexdigest() != runtime[digest]:
                 raise ValueError('The Spine runtime or license differs from its recorded provenance: ' + base + name)
+    table_provenance = json.loads(files['static/vendor/tabulator/PROVENANCE.json'].read_text())
+    if table_provenance.get('package') != 'tabulator-tables' or table_provenance.get('version') != '6.5.0':
+        raise ValueError('The table library provenance differs from the pinned version')
+    for name, digest in table_provenance['files'].items():
+        relative = 'static/vendor/tabulator/' + name
+        if relative not in files or hashlib.sha256(files[relative].read_bytes()).hexdigest() != digest:
+            raise ValueError('The table library or license differs from its provenance: ' + relative)
     # Validate the complete source list before writing any output. This cannot
     # descend into runtime data, virtualenvs, proof files or private documents.
     for relative, path in files.items():

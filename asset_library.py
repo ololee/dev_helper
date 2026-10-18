@@ -646,7 +646,7 @@ class AssetLibrary:
         except Exception as error:
             self._update_job(identifier, state='failed', progress=stats, error=type(error).__name__ + ': ' + str(error), finishedAt=time.time())
 
-    def list_assets(self, project_id=None, query='', kind=None, limit=100, offset=0):
+    def list_assets(self, project_id=None, query='', kind=None, limit=100, offset=0, sort='name', order='asc'):
         limit, offset = _limit(limit, 500), _offset(offset)
         if project_id is not None:
             _id(project_id)
@@ -654,6 +654,9 @@ class AssetLibrary:
             raise AssetLibraryError('Unknown asset kind')
         if not isinstance(query, str) or len(query) > 500:
             raise AssetLibraryError('Query must be at most 500 characters')
+        sorts = {'name': 'a.path COLLATE NOCASE', 'modified': 'a.mtime_ns', 'size': 'a.size', 'kind': 'a.kind COLLATE NOCASE'}
+        if sort not in sorts or order not in ('asc', 'desc'):
+            raise AssetLibraryError('Sort must be name/modified/size/kind with asc/desc order')
         clauses, args = [], []
         if project_id:
             clauses.append('a.project_id=?'); args.append(project_id)
@@ -670,8 +673,8 @@ class AssetLibrary:
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         with self._db() as db:
             total = db.execute('SELECT COUNT(*) FROM assets a' + where, args).fetchone()[0]
-            rows = db.execute('SELECT a.* FROM assets a' + where + ' ORDER BY a.path COLLATE NOCASE LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
-            return {'items': [self._public_asset(db, row) for row in rows], 'total': total, 'limit': limit, 'offset': offset}
+            rows = db.execute('SELECT a.* FROM assets a' + where + ' ORDER BY ' + sorts[sort] + ' ' + order.upper() + ',a.id LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
+            return {'items': [self._public_asset(db, row) for row in rows], 'total': total, 'limit': limit, 'offset': offset, 'sort': sort, 'order': order}
 
     def _public_asset(self, db, row):
         result = {'id': row['id'], 'projectId': row['project_id'], 'path': row['path'], 'name': PurePosixPath(row['path']).name,
@@ -789,9 +792,18 @@ class AssetLibrary:
             clean['confidence'] = value
         clean['sha256'] = item['sha256']
         with self.lock, self._db() as db:
+            previous = db.execute('SELECT data FROM annotations WHERE asset_id=? AND source=?', (asset_id, data['source'])).fetchone()
+            if previous is None or json.loads(previous['data']) != clean:
+                self._invalidate_description_vectors(db, asset_id)
             db.execute('INSERT INTO annotations VALUES(?,?,?,?) ON CONFLICT(asset_id,source) DO UPDATE SET data=excluded.data,updated=excluded.updated', (asset_id, data['source'], _json(clean), time.time()))
             self._refresh_search(db, asset_id)
         return self.asset(asset_id)
+
+    @staticmethod
+    def _invalidate_description_vectors(db, asset_id):
+        # These spaces are reserved for generated metadata/annotation embeddings.
+        # Imported image/audio vectors do not depend on the edited descriptions.
+        db.execute("DELETE FROM embeddings WHERE asset_id=? AND model LIKE 'asset-metadata-text-%'", (asset_id,))
 
     def similar(self, asset_id, limit=20, mode='visual', model=None, candidate_limit=10000):
         item = self.asset(asset_id)
@@ -859,14 +871,18 @@ class AssetLibrary:
                 db.executemany('INSERT INTO embeddings VALUES(?,?,?,?,?) ON CONFLICT(asset_id,model) DO UPDATE SET dimensions=excluded.dimensions,vector=excluded.vector,sha256=excluded.sha256', validated)
             return {'count': len(validated), 'model': model, 'dimensions': dimensions, 'normalized': True, 'generatedLocally': False}
 
-    def query_embedding(self, vector, model, project_id=None, limit=20, candidate_limit=10000, exclude_id=None):
+    def query_embedding(self, vector, model, project_id=None, limit=20, candidate_limit=10000, exclude_id=None, kind=None):
         vector, model = _vector(vector), _model(model)
-        limit, candidate_limit = _limit(limit, 100), _limit(candidate_limit, 100000)
+        limit, candidate_limit = _limit(limit, 1000), _limit(candidate_limit, 100000)
         clauses, args = ['e.model=?', 'e.dimensions=?', 'e.sha256=a.sha256'], [model, len(vector)]
         if project_id is not None:
             clauses.append('a.project_id=?'); args.append(_id(project_id))
         if exclude_id:
             clauses.append('a.id!=?'); args.append(_id(exclude_id))
+        if kind is not None:
+            if kind not in KINDS:
+                raise AssetLibraryError('Unknown asset kind')
+            clauses.append('a.kind=?'); args.append(kind)
         where = ' AND '.join(clauses)
         with self._db() as db:
             total = db.execute('SELECT COUNT(*) FROM embeddings e JOIN assets a ON a.id=e.asset_id WHERE ' + where, args).fetchone()[0]
@@ -927,7 +943,11 @@ class AssetLibrary:
             row = db.execute('SELECT sha256,metadata FROM assets WHERE id=?', (asset_id,)).fetchone()
             if row['sha256'] != item['sha256']:
                 raise AssetLibraryError('Source was reindexed during OCR; retry', 409)
-            metadata = json.loads(row['metadata']); metadata['ocr'] = result
+            metadata = json.loads(row['metadata'])
+            previous = metadata.get('ocr', {})
+            if (previous.get('status'), previous.get('text')) != (result.get('status'), result.get('text')):
+                self._invalidate_description_vectors(db, asset_id)
+            metadata['ocr'] = result
             db.execute('UPDATE assets SET metadata=? WHERE id=?', (_json(metadata), asset_id))
             self._refresh_search(db, asset_id)
         return result
@@ -971,7 +991,11 @@ class AssetLibrary:
             row = db.execute('SELECT sha256, metadata FROM assets WHERE id=?', (item['id'],)).fetchone()
             if not row or row['sha256'] != item['sha256']:
                 raise AssetLibraryError('Source was reindexed during OCR; retry', 409)
-            metadata = json.loads(row['metadata']); metadata['ocr'] = result
+            metadata = json.loads(row['metadata'])
+            previous = metadata.get('ocr', {})
+            if (previous.get('status'), previous.get('text')) != (result.get('status'), result.get('text')):
+                self._invalidate_description_vectors(db, item['id'])
+            metadata['ocr'] = result
             db.execute('UPDATE assets SET metadata=? WHERE id=?', (_json(metadata), item['id']))
             self._refresh_search(db, item['id'])
         return result

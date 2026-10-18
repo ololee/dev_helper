@@ -16,6 +16,11 @@ included in static/vendor/markdown-it.LICENSE and
 static/vendor/markdown-it.provenance.json. This project retains the upstream
 browser bundle without changes.
 
+The resource library bundles Tabulator 6.5.0 from the official tabulator-tables
+npm distribution under the MIT License. The original license, package integrity
+and individual SHA-256 hashes are retained in static/vendor/tabulator/.
+Upstream: https://github.com/tabulator-tables/tabulator
+
 Python packages are installed separately from the declared dependencies in
 pyproject.toml. Their respective license terms apply to those packages. This
 source distribution does not include third-party Python environment files,

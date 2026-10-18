@@ -1,0 +1,14 @@
+{
+  "package": "tabulator-tables",
+  "version": "6.5.0",
+  "repository": "https://github.com/tabulator-tables/tabulator",
+  "license": "MIT",
+  "source": "https://registry.npmjs.org/tabulator-tables/-/tabulator-tables-6.5.0.tgz",
+  "sourceIntegrity": "sha512-n0S4rvb2tGJnVBXoiB8ns1liGfSz+sgniG5a92vEY+Wqj3R4L2LB+bF29OeWmEJwo4KAsdhfeknW2S92s/mvMw==",
+  "files": {
+    "tabulator.min.js": "297f32de082fe4593d385f3a1b16b901f5208b1702ff9f64f454f3460d911170",
+    "tabulator.min.css": "b55e204b2f968cecc4d3663d37858093b31dd22d20f01d76f590726ee18f7e1f",
+    "LICENSE": "191a2ee554684e1064c897b432f0e1bc6dfa714ca045d3f6ea2cf692cbd398b7"
+  },
+  "notes": "Prebuilt distribution from the official npm package; original license retained, no package scripts executed. Served locally without CDN."
+}
